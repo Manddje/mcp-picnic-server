@@ -179,7 +179,7 @@ export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void 
 export function describeRedirect(redirectUri: string, t: Strings): string {
   try {
     const url = new URL(redirectUri);
-    if (url.protocol === "https:") return url.hostname;
+    if (url.protocol === "https:") return url.host;
     if (url.protocol === "http:") return t.thisComputer;
     return `${url.protocol}//`;
   } catch {
@@ -198,6 +198,8 @@ export type LoginPageOptions = {
   tx: string;
   clientName: string | undefined;
   redirectUri: string;
+  /** Whether the redirect URI belongs to a known app or the user's own computer. Otherwise the page warns. */
+  verified: boolean;
   country: Country;
   email?: string;
   error?: string;
@@ -208,7 +210,8 @@ export type LoginPageOptions = {
 export function sendLoginPage(res: Response, status: number, o: LoginPageOptions): void {
   const t = STRINGS[o.lang];
   const target = describeRedirect(o.redirectUri, t);
-  const app = o.clientName || target;
+  // Anyone can register a client under any name, so only a verified app is called by its own name.
+  const app = (o.verified && o.clientName) || target;
   const countryName: Record<Country, string> = { NL: t.countryNL, DE: t.countryDE, FR: t.countryFR };
 
   const body = `<div class="wrap narrow login">
@@ -216,7 +219,11 @@ export function sendLoginPage(res: Response, status: number, o: LoginPageOptions
 <main class="card">
 <h1>${esc(t.loginTitle)}</h1>
 <p class="lead">${fill(t.loginFor, "app", `<strong>${esc(app)}</strong>`)}</p>
-<p class="sub">${fill(t.loginReturn, "target", `<strong>${esc(target)}</strong>`)}</p>
+${
+    o.verified
+      ? `<p class="sub">${fill(t.loginReturn, "target", `<strong>${esc(target)}</strong>`)}</p>`
+      : `<div class="alert" role="alert">${fill(t.unknownApp, "target", `<strong>${esc(target)}</strong>`)}</div>`
+  }
 ${o.error ? `<div class="alert" role="alert">${esc(o.error)}</div>` : ""}
 <form method="post" action="/login" autocomplete="on">
 <input type="hidden" name="tx" value="${esc(o.tx)}">

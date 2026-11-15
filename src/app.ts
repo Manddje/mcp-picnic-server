@@ -9,7 +9,7 @@ import type { Config } from "./config.js";
 import { Sealer } from "./crypto.js";
 import { pickLang } from "./i18n.js";
 import { createLoginRouter } from "./login.js";
-import { PicnicOAuthProvider, SCOPE, sessionOf } from "./oauth.js";
+import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding } from "./pages.js";
 import { createPicnicClient, type PicnicFactory } from "./picnic.js";
 import { buildMcpServer } from "./tools.js";
@@ -22,6 +22,8 @@ export type AppOptions = {
   picnic?: PicnicFactory;
   /** Sign-in attempts allowed per IP address per 15 minutes. */
   signInAttemptLimit?: number;
+  /** Sign-in attempts allowed per Picnic account per 15 minutes. */
+  accountAttemptLimit?: number;
   log?: (message: string) => void;
 };
 
@@ -29,13 +31,19 @@ function rpcError(res: Response, status: number, code: number, message: string):
   res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
 }
 
-export function createApp({ config, picnic = createPicnicClient, signInAttemptLimit = 15, log = console.log }: AppOptions): Express {
+export function createApp({
+  config,
+  picnic = createPicnicClient,
+  signInAttemptLimit = 15,
+  accountAttemptLimit = 10,
+  log = console.log,
+}: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy);
 
   const sealer = new Sealer(config.secretKey);
-  const provider = new PicnicOAuthProvider(sealer, picnic);
+  const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
   const mcpUrl = new URL("/mcp", config.publicUrl);
   const secure = config.publicUrl.protocol === "https:";
 
@@ -103,7 +111,18 @@ export function createApp({ config, picnic = createPicnicClient, signInAttemptLi
     });
   });
 
-  app.use(createLoginRouter({ sealer, provider, picnic, serviceName: config.serviceName, attemptLimit: signInAttemptLimit, log }));
+  app.use(
+    createLoginRouter({
+      sealer,
+      provider,
+      picnic,
+      serviceName: config.serviceName,
+      attemptLimit: signInAttemptLimit,
+      accountAttemptLimit,
+      globalLimitPerMinute: config.signInLimitPerMinute,
+      log,
+    }),
+  );
 
   /* ---------- MCP endpoint ---------- */
 

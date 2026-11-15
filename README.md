@@ -33,7 +33,7 @@ There is deliberately no tool to check out, pay or cancel an order. The assistan
 ## Deploy on Coolify
 
 1. Create a new resource from this Git repository and choose the **Dockerfile** build pack.
-2. Set the domain (for example `https://picnic.example.com`) and the port to `3000`.
+2. Set the domain (for example `https://picnic.example.com`) and the exposed port to `3000`. Leave **Ports Mappings** empty, so the app is only reachable through Coolify's proxy.
 3. Add one environment variable: `SECRET_KEY`, the output of `openssl rand -hex 32`.
 4. Deploy. The health check is built into the image (`/health`).
 
@@ -47,7 +47,10 @@ The public address is taken from the domain Coolify assigns (`COOLIFY_URL`). Set
 | `SERVICE_NAME` | no | Name on the pages. Default `Picnic MCP`. |
 | `CONTACT` | no | Email address or URL shown in the footer. |
 | `SOURCE_URL` | no | Link to the source code shown in the footer. |
-| `TRUST_PROXY` | no | Number of reverse proxies in front. Default `1`, which fits Coolify. |
+| `TRUST_PROXY` | no | Number of reverse proxies in front. Default `1` on Coolify, otherwise off. Set it to exactly the number of proxies: one too many lets visitors fake their IP address and walk past the sign-in limits. |
+| `UNKNOWN_APPS` | no | `warn` (default) or `block`. What to do with an app that isn't a known one; see below. |
+| `EXTRA_KNOWN_APPS` | no | Comma separated host names (`app.example.com`) and app schemes (`myapp://`) to treat as known apps. |
+| `SIGN_IN_LIMIT_PER_MINUTE` | no | Sign-ins that reach Picnic per minute, for the whole server. Default `60`. |
 
 Run one instance. Sign-ins in progress are held in memory for two minutes, so a second instance behind a load balancer would break some of them.
 
@@ -64,7 +67,8 @@ AI app ──► POST /mcp  (Bearer token) ──► picnic-api ──► Picnic
 - **No database**: the server stores nothing. A client registration is sealed into its client id, and the user's Picnic session key is sealed (AES-256-GCM) into the access and refresh token that the AI app holds. A leaked server disk contains no accounts.
 - **Passwords** are sent to Picnic once and never stored or logged. Request logs contain the method, path and status only.
 - **Signing out**: revoking a token, or the `disconnect_account` tool, signs the session out at Picnic, which invalidates every token of that sign-in.
-- **Limits**: sign-in attempts are limited per IP address. MCP requests are limited per signed-in user rather than per IP address, because AI apps send all their users' requests from a few addresses.
+- **Known apps**: anyone can register an app under any name, so the sign-in page only names an app when it sends the user back to a known address: Claude (`claude.ai`, `claude.com`), ChatGPT (`chatgpt.com`), VS Code (`vscode.dev`, `vscode://`), Cursor (`cursor://`) or an app on the user's own computer (`localhost`). For any other app it shows where the user will be sent and warns them to close the page if someone sent them the link. With `UNKNOWN_APPS=block` such apps are refused; add the ones you want with `EXTRA_KNOWN_APPS`.
+- **Limits**: sign-in attempts are limited per IP address (15 per 15 minutes), per Picnic account from any address (10 per 15 minutes), and for the whole server (`SIGN_IN_LIMIT_PER_MINUTE`), so that guessing passwords through this server doesn't get its IP address throttled by Picnic. Only forms that would reach Picnic count toward the last two. Someone who knows a user's email address can keep that account's sign-in blocked here for a while; the user's Picnic account itself is not affected. MCP requests are limited per signed-in user rather than per IP address, because AI apps send all their users' requests from a few addresses.
 
 Access tokens last 24 hours and refresh tokens a year, renewed on each refresh.
 

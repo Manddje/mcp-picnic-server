@@ -29,13 +29,25 @@ async function freePort(): Promise<number> {
 before(async () => {
   port = await freePort();
   picnic = new FakePicnic();
-  const config = loadConfig({ PORT: String(port), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false" });
+  const config = loadConfig({ PORT: String(port), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false", SIGN_IN_LIMIT_PER_MINUTE: "10000" });
   base = config.publicUrl.origin;
-  server = createApp({ config, picnic: picnic.factory, signInAttemptLimit: 10_000, log: () => {} }).listen(port, "127.0.0.1");
+  server = createApp({ config, picnic: picnic.factory, signInAttemptLimit: 10_000, accountAttemptLimit: 10_000, log: () => {} }).listen(
+    port,
+    "127.0.0.1",
+  );
   await new Promise((resolve) => server.once("listening", resolve));
 });
 
 after(() => new Promise((resolve) => server.close(resolve)));
+
+/** Starts a second server with other settings, for the tests of limits and policies. */
+async function startServer(env: Record<string, string>, options: { signInAttemptLimit?: number; accountAttemptLimit?: number } = {}) {
+  const otherPort = await freePort();
+  const config = loadConfig({ PORT: String(otherPort), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false", ...env });
+  const other = createApp({ config, picnic: picnic.factory, log: () => {}, ...options }).listen(otherPort, "127.0.0.1");
+  await new Promise((resolve) => other.once("listening", resolve));
+  return { base: config.publicUrl.origin, close: () => new Promise((resolve) => other.close(resolve)) };
+}
 
 const form = (fields: Record<string, string>) => ({
   method: "POST",
@@ -50,8 +62,8 @@ const hidden = (html: string, name: string) => {
   return value;
 };
 
-async function register(extra: Record<string, unknown> = {}) {
-  const res = await fetch(`${base}/register`, {
+async function register(extra: Record<string, unknown> = {}, at = base) {
+  const res = await fetch(`${at}/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_name: "Claude", redirect_uris: [REDIRECT], token_endpoint_auth_method: "none", ...extra }),
@@ -64,16 +76,16 @@ function pkce() {
   return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") };
 }
 
-async function openSignIn(clientId: string, challenge: string, state = "st4te") {
+async function openSignIn(clientId: string, challenge: string, { redirect = REDIRECT, at = base, lang = "nl-NL,nl;q=0.9" } = {}) {
   const query = new URLSearchParams({
     response_type: "code",
     client_id: clientId,
-    redirect_uri: REDIRECT,
+    redirect_uri: redirect,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    state,
+    state: "st4te",
   });
-  return fetch(`${base}/authorize?${query}`, { headers: { "Accept-Language": "nl-NL,nl;q=0.9" } });
+  return fetch(`${at}/authorize?${query}`, { headers: { "Accept-Language": lang } });
 }
 
 /** Walks the whole sign-in as a browser would and returns the authorization code. */
@@ -193,6 +205,24 @@ describe("sign-in", () => {
     assert.match(html, /<strong>claude\.ai<\/strong>/);
   });
 
+  it("does not name an unknown app, and warns about where the user is sent", async () => {
+    const evil = "https://claude.ai.attacker.example/api/mcp/auth_callback";
+    const { client } = await register({ redirect_uris: [evil] });
+    const html = await (await openSignIn(client.client_id, pkce().challenge, { redirect: evil, lang: "en" })).text();
+    assert.ok(!html.includes("<strong>Claude</strong>"), "the self-chosen name is not shown");
+    assert.match(html, /<strong>claude\.ai\.attacker\.example<\/strong> wants to connect/);
+    assert.match(html, /role="alert">This app is not on this server&#39;s list of known apps/);
+  });
+
+  it("names apps on the user's own computer and known app schemes", async () => {
+    for (const redirect of ["http://localhost:6274/callback", "cursor://anysphere.cursor-mcp/oauth/callback"]) {
+      const { client } = await register({ client_name: "Some App", redirect_uris: [redirect] });
+      const html = await (await openSignIn(client.client_id, pkce().challenge, { redirect, lang: "en" })).text();
+      assert.match(html, /<strong>Some App<\/strong> wants to connect/, redirect);
+      assert.ok(!html.includes("known apps"), redirect);
+    }
+  });
+
   it("escapes a hostile client name", async () => {
     const { client } = await register({ client_name: `<script>alert(1)</script>` });
     const html = await (await openSignIn(client.client_id, pkce().challenge)).text();
@@ -269,11 +299,89 @@ describe("sign-in", () => {
     }
   });
 
+  it("limits sign-in attempts per account, from any IP address", async () => {
+    const other = await startServer({}, { signInAttemptLimit: 10_000, accountAttemptLimit: 2 });
+    try {
+      const { client } = await register({}, other.base);
+      const page = await (await openSignIn(client.client_id, pkce().challenge, { at: other.base })).text();
+      const attempt = (email: string) =>
+        fetch(`${other.base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email, password: "wrong" }));
+
+      const statuses: number[] = [];
+      for (const email of ["kim@example.com", "KIM@example.com", "kim@example.com"]) statuses.push((await attempt(email)).status);
+      assert.deepEqual(statuses, [401, 401, 429], "the same account, whatever the case of the address");
+      const blocked = await (await attempt("kim@example.com")).text();
+      assert.match(blocked, /Too many attempts/);
+      assert.ok(hidden(blocked, "tx"), "the form stays usable");
+      assert.equal((await attempt("sam@example.com")).status, 401, "other accounts are not affected");
+
+      // Forms that never reach Picnic don't count.
+      const missing = await fetch(`${other.base}/login`, form({ tx: hidden(page, "tx"), lang: "en", email: "sam@example.com", password: "" }));
+      assert.equal(missing.status, 400);
+      assert.equal((await attempt("sam@example.com")).status, 401);
+      assert.equal((await attempt("sam@example.com")).status, 429);
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("caps sign-ins for the whole server so Picnic doesn't throttle it", async () => {
+    const other = await startServer({ SIGN_IN_LIMIT_PER_MINUTE: "2" }, { signInAttemptLimit: 10_000, accountAttemptLimit: 10_000 });
+    try {
+      const { client } = await register({}, other.base);
+      const page = await (await openSignIn(client.client_id, pkce().challenge, { at: other.base })).text();
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await fetch(`${other.base}/login`, form({ tx: "A".repeat(80), email: "a@b.nl", password: "x" }))).status, 400);
+      }
+      const statuses: number[] = [];
+      for (const email of ["a@example.com", "b@example.com", "c@example.com"]) {
+        const res = await fetch(`${other.base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email, password: "wrong" }));
+        statuses.push(res.status);
+        if (res.status === 429) assert.match(await res.text(), /Too many people are signing in/);
+      }
+      assert.deepEqual(statuses, [401, 401, 429], "forged forms did not use up the budget");
+    } finally {
+      await other.close();
+    }
+  });
+
   it("gives every sign-in its own device id", async () => {
     const before = picnic.deviceIds.size;
     await connect();
     await connect();
     assert.equal(picnic.deviceIds.size, before + 2);
+  });
+});
+
+describe("settings", () => {
+  it("refuses unknown apps with UNKNOWN_APPS=block, including ones registered earlier", async () => {
+    const evil = "https://evil.example/cb";
+    const { client: earlier } = await register({ redirect_uris: [evil] });
+    const strict = await startServer({ UNKNOWN_APPS: "block", EXTRA_KNOWN_APPS: "app.example.org, myapp://" });
+    try {
+      assert.equal((await register({ redirect_uris: [evil] }, strict.base)).res.status, 400);
+      assert.equal((await openSignIn(earlier.client_id, pkce().challenge, { redirect: evil, at: strict.base })).status, 400);
+      for (const uri of [REDIRECT, "http://127.0.0.1:33418/callback", "https://app.example.org/cb", "myapp://oauth/cb"]) {
+        assert.equal((await register({ redirect_uris: [uri] }, strict.base)).res.status, 201, uri);
+      }
+    } finally {
+      await strict.close();
+    }
+  });
+
+  it("only trusts X-Forwarded-For when told to, or on Coolify", () => {
+    const secret = { SECRET_KEY: "t".repeat(48) };
+    assert.equal(loadConfig({ ...secret }).trustProxy, false);
+    assert.equal(loadConfig({ ...secret, COOLIFY_FQDN: "picnic.example.com" }).trustProxy, 1);
+    assert.equal(loadConfig({ ...secret, COOLIFY_FQDN: "picnic.example.com", TRUST_PROXY: "2" }).trustProxy, 2);
+    assert.equal(loadConfig({ ...secret, TRUST_PROXY: "1" }).trustProxy, 1);
+  });
+
+  it("rejects malformed settings", () => {
+    const secret = { SECRET_KEY: "t".repeat(48) };
+    assert.throws(() => loadConfig({ ...secret, UNKNOWN_APPS: "allow" }), /UNKNOWN_APPS/);
+    assert.throws(() => loadConfig({ ...secret, EXTRA_KNOWN_APPS: "https://x.example/cb" }), /EXTRA_KNOWN_APPS/);
+    assert.throws(() => loadConfig({ ...secret, SIGN_IN_LIMIT_PER_MINUTE: "0" }), /SIGN_IN_LIMIT_PER_MINUTE/);
   });
 });
 

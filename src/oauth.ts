@@ -48,18 +48,69 @@ export function isAllowedRedirectUri(uri: string): boolean {
   return !FORBIDDEN_SCHEMES.has(url.protocol);
 }
 
+/** Where the well-known MCP apps send users back to after signing in. */
+export const KNOWN_APP_HOSTS = ["claude.ai", "claude.com", "chatgpt.com", "vscode.dev", "insiders.vscode.dev"];
+export const KNOWN_APP_SCHEMES = ["cursor:", "vscode:", "vscode-insiders:"];
+
+/** known: a well-known app. local: an app on the user's own computer. unknown: anything else. */
+export type RedirectTrust = "known" | "local" | "unknown";
+
+/**
+ * Which apps the sign-in page vouches for. Anyone can register a client with any name, so the page
+ * only names an app whose redirect URI belongs to a known app or the user's own computer; for any
+ * other app it warns the user instead, or (with `blockUnknown`) refuses the app altogether.
+ */
+export class RedirectPolicy {
+  private readonly hosts: Set<string>;
+  private readonly schemes: Set<string>;
+
+  /** `extra` adds host names (example.com) and app schemes (myapp://) to the known apps. */
+  constructor(
+    extra: readonly string[] = [],
+    readonly blockUnknown = false,
+  ) {
+    this.hosts = new Set(KNOWN_APP_HOSTS);
+    this.schemes = new Set(KNOWN_APP_SCHEMES);
+    for (const entry of extra) {
+      if (entry.endsWith("://")) this.schemes.add(entry.slice(0, -2));
+      else this.hosts.add(entry);
+    }
+  }
+
+  trust(uri: string): RedirectTrust {
+    let url: URL;
+    try {
+      url = new URL(uri);
+    } catch {
+      return "unknown";
+    }
+    if (url.protocol === "https:") return this.hosts.has(url.hostname) ? "known" : "unknown";
+    if (url.protocol === "http:") return LOOPBACK.has(url.hostname) ? "local" : "unknown";
+    return this.schemes.has(url.protocol) ? "known" : "unknown";
+  }
+
+  /** Whether a client may use this redirect URI at all. */
+  allows(uri: string): boolean {
+    return isAllowedRedirectUri(uri) && (!this.blockUnknown || this.trust(uri) !== "unknown");
+  }
+}
+
 /**
  * Dynamic client registration without a database: the client id is the sealed registration.
  * Anyone may register (that's what lets a user paste the URL into any app), so a registration
  * proves nothing by itself; the sign-in page shows the user where they will be sent back to.
  */
 class SealedClientsStore implements OAuthRegisteredClientsStore {
-  constructor(private readonly sealer: Sealer) {}
+  constructor(
+    private readonly sealer: Sealer,
+    private readonly policy: RedirectPolicy,
+  ) {}
 
   getClient(clientId: string): OAuthClientInformationFull | undefined {
     if (!clientId.startsWith(CLIENT_PREFIX)) return undefined;
     const record = this.sealer.open<ClientRecord>("client", clientId.slice(CLIENT_PREFIX.length));
-    if (!record) return undefined;
+    // Also checked here, so registrations made before UNKNOWN_APPS=block stop working too.
+    if (!record || !record.r.every((uri) => this.policy.allows(uri))) return undefined;
     return {
       client_id: clientId,
       client_name: record.n,
@@ -77,7 +128,7 @@ class SealedClientsStore implements OAuthRegisteredClientsStore {
       throw new InvalidClientMetadataError("Register between 1 and 10 redirect_uris");
     }
     for (const uri of uris) {
-      if (uri.length > 400 || !isAllowedRedirectUri(uri)) {
+      if (uri.length > 400 || !this.policy.allows(uri)) {
         throw new InvalidClientMetadataError(`redirect_uri not allowed: ${uri.slice(0, 100)}`);
       }
     }
@@ -104,8 +155,9 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
   constructor(
     private readonly sealer: Sealer,
     private readonly picnic: PicnicFactory,
+    readonly redirectPolicy: RedirectPolicy = new RedirectPolicy(),
   ) {
-    this.clientsStore = new SealedClientsStore(sealer);
+    this.clientsStore = new SealedClientsStore(sealer, redirectPolicy);
   }
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {

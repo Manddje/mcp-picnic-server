@@ -61,6 +61,8 @@ const en = {
   loginFor: "{app} wants to connect to your Picnic account.",
   loginReturn: "After signing in you go back to {target}.",
   thisComputer: "an app on this computer",
+  unknownApp:
+    "This app is not on this server's list of known apps. Only continue if you just added Picnic yourself in an app at {target}. If someone sent you this link, close this page.",
   canDo: "It will be able to search products, view and change your cart, recipes and delivery slot, and see your orders.",
   cannotDo: "It cannot place or pay for an order.",
   country: "Country",
@@ -76,6 +78,7 @@ const en = {
   errThrottled: "Picnic is refusing sign-ins right now. Wait a few minutes and try again.",
   errGeneric: "Signing in at Picnic failed. Try again in a moment.",
   errTooMany: "Too many attempts. Wait a few minutes and try again.",
+  errBusy: "Too many people are signing in right now. Wait a minute and try again.",
   expiredTitle: "This sign-in page has expired",
   expiredText: "Go back to your AI app and connect again.",
 
@@ -147,6 +150,8 @@ const nl: Strings = {
   loginFor: "{app} wil verbinden met je Picnic-account.",
   loginReturn: "Na het inloggen ga je terug naar {target}.",
   thisComputer: "een app op deze computer",
+  unknownApp:
+    "Deze app staat niet op de lijst met bekende apps van deze server. Ga alleen verder als je Picnic net zelf hebt toegevoegd in een app op {target}. Heeft iemand je deze link gestuurd? Sluit dan deze pagina.",
   canDo: "De app kan producten zoeken, je mandje, recepten en bezorgmoment bekijken en aanpassen, en je bestellingen inzien.",
   cannotDo: "Een bestelling plaatsen of betalen kan de app niet.",
   country: "Land",
@@ -162,6 +167,7 @@ const nl: Strings = {
   errThrottled: "Picnic weigert op dit moment inlogpogingen. Wacht een paar minuten en probeer het opnieuw.",
   errGeneric: "Inloggen bij Picnic is niet gelukt. Probeer het zo nog eens.",
   errTooMany: "Te veel pogingen. Wacht een paar minuten en probeer het opnieuw.",
+  errBusy: "Er loggen nu te veel mensen tegelijk in. Wacht een minuut en probeer het opnieuw.",
   expiredTitle: "Deze inlogpagina is verlopen",
   expiredText: "Ga terug naar je AI-app en verbind opnieuw.",
 
@@ -230,6 +236,8 @@ const de: Strings = {
   loginFor: "{app} möchte sich mit deinem Picnic-Konto verbinden.",
   loginReturn: "Nach der Anmeldung gelangst du zurück zu {target}.",
   thisComputer: "einer App auf diesem Computer",
+  unknownApp:
+    "Diese App steht nicht auf der Liste bekannter Apps dieses Servers. Fahre nur fort, wenn du Picnic gerade selbst in einer App unter {target} hinzugefügt hast. Hat dir jemand diesen Link geschickt? Dann schließe diese Seite.",
   canDo: "Die App kann Produkte suchen, Warenkorb, Rezepte und Lieferfenster ansehen und ändern sowie deine Bestellungen einsehen.",
   cannotDo: "Eine Bestellung aufgeben oder bezahlen kann sie nicht.",
   country: "Land",
@@ -245,6 +253,7 @@ const de: Strings = {
   errThrottled: "Picnic lehnt Anmeldungen gerade ab. Warte ein paar Minuten und versuche es erneut.",
   errGeneric: "Die Anmeldung bei Picnic ist fehlgeschlagen. Versuche es gleich noch einmal.",
   errTooMany: "Zu viele Versuche. Warte ein paar Minuten und versuche es erneut.",
+  errBusy: "Gerade melden sich zu viele Personen gleichzeitig an. Warte eine Minute und versuche es erneut.",
   expiredTitle: "Diese Anmeldeseite ist abgelaufen",
   expiredText: "Gehe zurück zu deiner KI-App und verbinde dich erneut.",
 
@@ -313,6 +322,8 @@ const fr: Strings = {
   loginFor: "{app} souhaite se connecter à votre compte Picnic.",
   loginReturn: "Après la connexion, vous retournerez vers {target}.",
   thisComputer: "une application sur cet ordinateur",
+  unknownApp:
+    "Cette application ne figure pas dans la liste des applications connues de ce serveur. Ne continuez que si vous venez vous-même d'ajouter Picnic dans une application sur {target}. Si quelqu'un vous a envoyé ce lien, fermez cette page.",
   canDo: "L'application pourra chercher des produits, consulter et modifier votre panier, vos recettes et votre créneau de livraison, et voir vos commandes.",
   cannotDo: "Elle ne peut ni passer ni payer une commande.",
   country: "Pays",
@@ -328,6 +339,7 @@ const fr: Strings = {
   errThrottled: "Picnic refuse les connexions pour le moment. Patientez quelques minutes puis réessayez.",
   errGeneric: "La connexion à Picnic a échoué. Réessayez dans un instant.",
   errTooMany: "Trop de tentatives. Patientez quelques minutes puis réessayez.",
+  errBusy: "Trop de personnes se connectent en ce moment. Patientez une minute puis réessayez.",
   expiredTitle: "Cette page de connexion a expiré",
   expiredText: "Retournez dans votre application IA et reconnectez-vous.",
 

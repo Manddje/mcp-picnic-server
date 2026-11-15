@@ -9,8 +9,18 @@ export type Config = {
   secretKey: string;
   /** Name shown on the landing and sign-in pages. */
   serviceName: string;
-  /** Express "trust proxy" setting; 1 = one reverse proxy (Coolify/Traefik) in front. */
+  /**
+   * Express "trust proxy" setting; 1 = one reverse proxy (Coolify/Traefik) in front. Off unless set
+   * or running on Coolify: trusting X-Forwarded-For without a proxy lets anyone pick their own IP
+   * address and so walk past the sign-in limits.
+   */
   trustProxy: number | boolean | string;
+  /** Extra known apps: host names (example.com) and app schemes (myapp://). */
+  extraKnownApps: string[];
+  /** What to do with an app whose redirect URI is not a known one: warn on the sign-in page, or refuse it. */
+  unknownApps: "warn" | "block";
+  /** Sign-ins that reach Picnic per minute, for the whole server, so Picnic doesn't throttle its IP address. */
+  signInLimitPerMinute: number;
   /** Optional contact shown on the landing page (email address or URL). */
   contact: string | null;
   /** Optional link to the source code shown on the landing page. */
@@ -24,8 +34,9 @@ function firstUrl(value: string | undefined): string | undefined {
   return /^https?:\/\//.test(first) ? first : `https://${first}`;
 }
 
-function parseTrustProxy(value: string | undefined): number | boolean | string {
-  if (value === undefined || value === "") return 1;
+function parseTrustProxy(value: string | undefined, onCoolify: boolean): number | boolean | string {
+  // Coolify always puts its Traefik proxy in front of the app.
+  if (value === undefined || value === "") return onCoolify ? 1 : false;
   if (value === "true") return true;
   if (value === "false") return false;
   const n = Number(value);
@@ -61,13 +72,42 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("SECRET_KEY must be at least 32 characters. Generate one with: openssl rand -hex 32");
   }
 
+  const onCoolify = Boolean(env.COOLIFY_URL?.trim() || env.COOLIFY_FQDN?.trim());
+  const trustProxy = parseTrustProxy(env.TRUST_PROXY?.trim(), onCoolify);
+  if (trustProxy === false && !isLocal) {
+    console.warn("[config] TRUST_PROXY is not set: client IP addresses are taken from the connection. Behind one reverse proxy, set TRUST_PROXY=1.");
+  }
+
+  const extraKnownApps = (env.EXTRA_KNOWN_APPS ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  for (const entry of extraKnownApps) {
+    if (!/^[a-z0-9.-]+$/.test(entry) && !/^[a-z][a-z0-9+.-]*:\/\/$/.test(entry)) {
+      throw new Error(`EXTRA_KNOWN_APPS: "${entry}" is neither a host name (example.com) nor an app scheme (myapp://)`);
+    }
+  }
+
+  const unknownApps = env.UNKNOWN_APPS?.trim() || "warn";
+  if (unknownApps !== "warn" && unknownApps !== "block") {
+    throw new Error(`UNKNOWN_APPS must be "warn" or "block" (got "${unknownApps}")`);
+  }
+
+  const signInLimitPerMinute = Number(env.SIGN_IN_LIMIT_PER_MINUTE?.trim() || 60);
+  if (!Number.isInteger(signInLimitPerMinute) || signInLimitPerMinute < 1) {
+    throw new Error("SIGN_IN_LIMIT_PER_MINUTE must be a whole number of at least 1");
+  }
+
   return {
     publicUrl,
     port,
     host: env.HOST ?? "0.0.0.0",
     secretKey,
     serviceName: env.SERVICE_NAME?.trim() || "Picnic MCP",
-    trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    trustProxy,
+    extraKnownApps,
+    unknownApps,
+    signInLimitPerMinute,
     contact: env.CONTACT?.trim() || null,
     sourceUrl: env.SOURCE_URL?.trim() || null,
   };
