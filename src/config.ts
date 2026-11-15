@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { parseCallbackPattern } from "./oauth.js";
 
 export type Config = {
   /** The public base URL of this server, without a trailing slash, e.g. https://picnic.example.com */
@@ -15,7 +16,7 @@ export type Config = {
    * address and so walk past the sign-in limits.
    */
   trustProxy: number | boolean | string;
-  /** Extra known apps: host names (example.com) and app schemes (myapp://). */
+  /** Extra known apps: callback addresses (https://example.com/oauth/callback), app schemes (myapp://) and whole host names (example.com). */
   extraKnownApps: string[];
   /** What to do with an app whose redirect URI is not a known one: warn on the sign-in page, or refuse it. */
   unknownApps: "warn" | "block";
@@ -23,6 +24,8 @@ export type Config = {
   signInLimitPerMinute: number;
   /** Requests of any kind that reach Picnic per minute, for the whole server. */
   picnicLimitPerMinute: number;
+  /** Requests one signed-in user may send to Picnic per minute, out of the server's. */
+  picnicUserLimitPerMinute: number;
   /** Seconds without any request to Picnic after it throttled one; 0 for no pause. */
   picnicPauseSeconds: number;
   /** Optional contact shown on the landing page (email address or URL). */
@@ -84,11 +87,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const extraKnownApps = (env.EXTRA_KNOWN_APPS ?? "")
     .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    // A callback address keeps its case: paths are case sensitive.
+    .map((entry) => (/^https?:\/\//i.test(entry) ? entry : entry.toLowerCase()));
   for (const entry of extraKnownApps) {
-    if (!/^[a-z0-9.-]+$/.test(entry) && !/^[a-z][a-z0-9+.-]*:\/\/$/.test(entry)) {
-      throw new Error(`EXTRA_KNOWN_APPS: "${entry}" is neither a host name (example.com) nor an app scheme (myapp://)`);
+    if (!parseCallbackPattern(entry) && !/^[a-z0-9.-]+$/.test(entry) && !/^[a-z][a-z0-9+.-]*:\/\/$/.test(entry)) {
+      throw new Error(
+        `EXTRA_KNOWN_APPS: "${entry}" is not a callback address (https://example.com/oauth/callback, without a query), an app scheme (myapp://) or a host name (example.com)`,
+      );
     }
   }
 
@@ -104,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
   const signInLimitPerMinute = wholeNumber("SIGN_IN_LIMIT_PER_MINUTE", 60, 1);
   const picnicLimitPerMinute = wholeNumber("PICNIC_LIMIT_PER_MINUTE", 300, 1);
+  const picnicUserLimitPerMinute = wholeNumber("PICNIC_USER_LIMIT_PER_MINUTE", 120, 1);
   const picnicPauseSeconds = wholeNumber("PICNIC_PAUSE_SECONDS", 60, 0);
 
   return {
@@ -117,6 +125,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     unknownApps,
     signInLimitPerMinute,
     picnicLimitPerMinute,
+    picnicUserLimitPerMinute,
     picnicPauseSeconds,
     contact: env.CONTACT?.trim() || null,
     sourceUrl: env.SOURCE_URL?.trim() || null,

@@ -9,7 +9,7 @@ import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
 import { LANGS, STRINGS } from "../src/i18n.js";
-import { isAllowedRedirectUri, SIGN_IN_TTL } from "../src/oauth.js";
+import { isAllowedRedirectUri, RedirectPolicy, SIGN_IN_TTL } from "../src/oauth.js";
 import { createPicnicClient, PicnicGuard, PicnicHeldError } from "../src/picnic.js";
 import { FakePicnic } from "./fake-picnic.js";
 
@@ -38,6 +38,7 @@ before(async () => {
     TRUST_PROXY: "false",
     SIGN_IN_LIMIT_PER_MINUTE: "10000",
     PICNIC_LIMIT_PER_MINUTE: "100000",
+    PICNIC_USER_LIMIT_PER_MINUTE: "100000",
     PICNIC_PAUSE_SECONDS: "0",
   });
   base = config.publicUrl.origin;
@@ -345,6 +346,41 @@ describe("sign-in", () => {
     }
   });
 
+  it("knows a well-known app by its exact callback address, not by its host", async () => {
+    const policy = new RedirectPolicy();
+    for (const uri of [
+      "https://claude.ai/api/mcp/auth_callback",
+      "https://claude.com/api/mcp/auth_callback",
+      "https://chatgpt.com/connector_platform_oauth_redirect",
+      "https://chatgpt.com/connector/oauth/cb_1a2B3c",
+      "https://vscode.dev/redirect",
+      "https://insiders.vscode.dev/redirect",
+    ]) {
+      assert.equal(policy.trust(uri), "known", uri);
+    }
+    for (const uri of [
+      "https://claude.ai/",
+      "https://claude.ai/any/other/page",
+      "https://claude.ai/api/mcp/auth_callback/",
+      "https://claude.ai/api/mcp/auth_callback/more",
+      "https://claude.ai/api/mcp/auth_callback?next=https://evil.example",
+      "https://claude.ai:8443/api/mcp/auth_callback",
+      "https://chatgpt.com/connector/oauth/",
+      "https://chatgpt.com/connector/oauth/a/b",
+      "https://chatgpt.com/connector/oauth/a%2Fb",
+      "https://vscode.dev/redirect/other",
+    ]) {
+      assert.equal(policy.trust(uri), "unknown", uri);
+    }
+
+    // On the page: another address on a known host gets the warning, and not its self-chosen name.
+    const other = "https://claude.ai/any/other/page";
+    const { client } = await register({ client_name: "Picnic Security Team", redirect_uris: [other] });
+    const html = await (await openSignIn(client.client_id, pkce().challenge, { redirect: other, lang: "en" })).text();
+    assert.ok(!html.includes("Picnic Security Team"), "the self-chosen name is not shown");
+    assert.match(html, /role="alert">This app is not on this server&#39;s list of known apps/);
+  });
+
   it("escapes a hostile client name", async () => {
     const { client } = await register({ client_name: `<script>alert(1)</script>` });
     const html = await (await openSignIn(client.client_id, pkce().challenge)).text();
@@ -479,11 +515,23 @@ describe("settings", () => {
   it("refuses unknown apps with UNKNOWN_APPS=block, including ones registered earlier", async () => {
     const evil = "https://evil.example/cb";
     const { client: earlier } = await register({ redirect_uris: [evil] });
-    const strict = await startServer({ UNKNOWN_APPS: "block", EXTRA_KNOWN_APPS: "app.example.org, myapp://" });
+    const strict = await startServer({
+      UNKNOWN_APPS: "block",
+      EXTRA_KNOWN_APPS: "app.example.org, myapp://, https://Exact.example.org/oauth/Callback, https://many.example.org/cb/*",
+    });
     try {
-      assert.equal((await register({ redirect_uris: [evil] }, strict.base)).res.status, 400);
+      for (const uri of [evil, "https://claude.ai/any/other/page", "https://exact.example.org/oauth/callback", "https://exact.example.org/", "https://many.example.org/cb/a/b"]) {
+        assert.equal((await register({ redirect_uris: [uri] }, strict.base)).res.status, 400, uri);
+      }
       assert.equal((await openSignIn(earlier.client_id, pkce().challenge, { redirect: evil, at: strict.base })).status, 400);
-      for (const uri of [REDIRECT, "http://127.0.0.1:33418/callback", "https://app.example.org/cb", "myapp://oauth/cb"]) {
+      for (const uri of [
+        REDIRECT,
+        "http://127.0.0.1:33418/callback",
+        "https://app.example.org/cb",
+        "myapp://oauth/cb",
+        "https://exact.example.org/oauth/Callback",
+        "https://many.example.org/cb/one",
+      ]) {
         assert.equal((await register({ redirect_uris: [uri] }, strict.base)).res.status, 201, uri);
       }
     } finally {
@@ -502,9 +550,12 @@ describe("settings", () => {
   it("rejects malformed settings", () => {
     const secret = { SECRET_KEY: "t".repeat(48) };
     assert.throws(() => loadConfig({ ...secret, UNKNOWN_APPS: "allow" }), /UNKNOWN_APPS/);
-    assert.throws(() => loadConfig({ ...secret, EXTRA_KNOWN_APPS: "https://x.example/cb" }), /EXTRA_KNOWN_APPS/);
+    for (const entry of ["http://x.example/cb", "https://x.example/cb?x=1", "https://x.example/*/cb", "https://x.example/cb*", "x.example/cb"]) {
+      assert.throws(() => loadConfig({ ...secret, EXTRA_KNOWN_APPS: entry }), /EXTRA_KNOWN_APPS/, entry);
+    }
     assert.throws(() => loadConfig({ ...secret, SIGN_IN_LIMIT_PER_MINUTE: "0" }), /SIGN_IN_LIMIT_PER_MINUTE/);
     assert.throws(() => loadConfig({ ...secret, PICNIC_LIMIT_PER_MINUTE: "0" }), /PICNIC_LIMIT_PER_MINUTE/);
+    assert.throws(() => loadConfig({ ...secret, PICNIC_USER_LIMIT_PER_MINUTE: "0" }), /PICNIC_USER_LIMIT_PER_MINUTE/);
     assert.throws(() => loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "-1" }), /PICNIC_PAUSE_SECONDS/);
     assert.equal(loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "0" }).picnicPauseSeconds, 0);
   });
@@ -690,6 +741,22 @@ describe("mcp", () => {
     assert.equal((await revoke()).status, 200, "Picnic refuses the key, which is what revoking is for");
   });
 
+  it("refuses batches, which would count as one request while doing the work of many", async () => {
+    const { access_token } = await connect("batch@example.com");
+    const call = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "add_to_cart", arguments: { items: [{ product_id: "s100" }] } } });
+    const sentBefore = picnic.requests;
+    for (const path of ["/picnic/mcp", "/mcp"]) {
+      const res = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify([call(1), call(2)]),
+      });
+      assert.equal(res.status, 400, path);
+      assert.equal(((await res.json()) as { error: { code: number } }).error.code, -32600, path);
+    }
+    assert.equal(picnic.requests, sentBefore, "nothing went to Picnic");
+  });
+
   it("only speaks POST", async () => {
     const { access_token } = await connect();
     const res = await fetch(`${base}/picnic/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
@@ -725,6 +792,30 @@ describe("protecting the server's IP address at Picnic", () => {
 
       assert.equal(picnic.requests, sentBefore + 4, "nothing went to Picnic beyond the cap");
       await client.close();
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("gives one user a share of the server's requests, so the others keep theirs", async () => {
+    const other = await startServer({ PICNIC_USER_LIMIT_PER_MINUTE: "3" });
+    try {
+      const greedy = await mcp((await connect("no2fa-greedy@example.com", other.base)).access_token, other.base);
+      const modest = await mcp((await connect("no2fa-modest@example.com", other.base)).access_token, other.base);
+      const sentBefore = picnic.requests;
+
+      const added = JSON.parse(textOf(await greedy.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100", "s200", "s100") })));
+      assert.equal(added.cart.item_count, 3, "what was added within the share is reported");
+      assert.deepEqual(added.failed.map((f: { product_id: string }) => f.product_id), ["s200", "s100"]);
+      assert.match(added.failed[0].reason, /one user may per minute/);
+      assert.match(added.failed[1].reason, /Not tried/);
+      const again = await greedy.callTool({ name: "get_cart", arguments: {} });
+      assert.equal(again.isError, true, "the user stays over their share for the rest of the minute");
+      assert.equal(picnic.requests, sentBefore + 3, "nothing went to Picnic beyond the share");
+
+      assert.equal(JSON.parse(textOf(await modest.callTool({ name: "get_cart", arguments: {} }))).item_count, 0, "another user is not held back");
+      await greedy.close();
+      await modest.close();
     } finally {
       await other.close();
     }
@@ -768,7 +859,7 @@ describe("protecting the server's IP address at Picnic", () => {
     }) as typeof fetch;
     try {
       let time = 0;
-      const guard = new PicnicGuard({ limitPerMinute: 2, pauseMs: 30_000, now: () => time });
+      const guard = new PicnicGuard({ limitPerMinute: 2, userLimitPerMinute: 100, pauseMs: 30_000, now: () => time });
       const client = createPicnicClient(guard)({ country: "NL", deviceId: "DEVICE", authKey: "key" });
       const held = (reason: string) => (error: unknown) => error instanceof PicnicHeldError && error.reason === reason;
 
@@ -788,6 +879,38 @@ describe("protecting the server's IP address at Picnic", () => {
       time = 60_000;
       await client.cart.getCart();
       assert.equal(sent.length, 4);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("counts the requests of the real Picnic client per user", async () => {
+    const realFetch = globalThis.fetch;
+    let sent = 0;
+    globalThis.fetch = (async () => {
+      sent++;
+      return Response.json({ items: [] });
+    }) as unknown as typeof fetch;
+    try {
+      let time = 0;
+      const picnicFor = createPicnicClient(new PicnicGuard({ limitPerMinute: 100, userLimitPerMinute: 2, pauseMs: 0, now: () => time }));
+      const client = (authKey?: string) => picnicFor({ country: "NL", deviceId: "DEVICE", authKey });
+      const held = (error: unknown) => error instanceof PicnicHeldError && error.reason === "user";
+
+      await client("kim").cart.getCart();
+      // A page is fetched another way than the cart, and every tool call makes a new client.
+      await client("kim").catalog.getFavorites().catch((error: unknown) => assert.ok(!held(error)));
+      await assert.rejects(client("kim").cart.getCart(), held);
+      await assert.rejects(client("kim").catalog.getFavorites(), held);
+      assert.equal(sent, 2, "nothing is sent beyond the share");
+
+      await client("sam").cart.getCart();
+      for (let i = 0; i < 3; i++) await client().cart.getCart();
+      assert.equal(sent, 6, "another user and requests without a user, like a sign-in, are not held back");
+
+      time = 60_000;
+      await client("kim").cart.getCart();
+      assert.equal(sent, 7);
     } finally {
       globalThis.fetch = realFetch;
     }

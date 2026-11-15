@@ -36,6 +36,8 @@ function explain(error: unknown): string {
       return "Picnic is temporarily refusing requests. Wait a minute before trying again.";
     case "busy":
       return "This server has sent Picnic as many requests as it allows itself per minute. Wait a minute before trying again.";
+    case "over_share":
+      return "This connection has sent Picnic as many requests as one user may per minute. Wait a minute before trying again.";
     case "not_found":
       return "Not found. The id doesn't exist, or the product isn't available at the user's address.";
     default: {
@@ -239,7 +241,7 @@ export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
         const { kind } = classifyPicnicError(error);
         if (kind === "session") throw error;
         failed.push({ product_id: item.product_id, reason: explain(error) });
-        if (kind === "throttled" || kind === "busy") {
+        if (kind === "throttled" || kind === "busy" || kind === "over_share") {
           // The rest would be refused too, and requests sent while Picnic throttles prolong it.
           for (const rest of items.slice(index + 1)) failed.push({ product_id: rest.product_id, reason: "Not tried, because of the error above." });
           break;
