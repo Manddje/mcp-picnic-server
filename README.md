@@ -66,11 +66,11 @@ AI app ──► POST /mcp  (Bearer token) ──► picnic-api ──► Picnic
 - **Sign-in**: OAuth 2.1 with PKCE and dynamic client registration, which is what lets a user add the server by URL alone. The sign-in page passes the credentials to Picnic and handles the SMS code.
 - **No database**: the server stores nothing. A client registration is sealed into its client id, and the user's Picnic session key is sealed (AES-256-GCM) into the access and refresh token that the AI app holds. A leaked server disk contains no accounts.
 - **Passwords** are sent to Picnic once and never stored or logged. Request logs contain the method, path and status only.
-- **Signing out**: revoking a token, or the `disconnect_account` tool, signs the session out at Picnic, which invalidates every token of that sign-in.
+- **Signing out**: revoking a token, or the `disconnect_account` tool, signs the session out at Picnic, which invalidates every token of that sign-in. When Picnic can't be reached, revoking fails with an error instead of reporting a token as revoked while it still works.
 - **Known apps**: anyone can register an app under any name, so the sign-in page only names an app when it sends the user back to a known address: Claude (`claude.ai`, `claude.com`), ChatGPT (`chatgpt.com`), VS Code (`vscode.dev`, `vscode://`), Cursor (`cursor://`) or an app on the user's own computer (`localhost`). For any other app it shows where the user will be sent and warns them to close the page if someone sent them the link. With `UNKNOWN_APPS=block` such apps are refused; add the ones you want with `EXTRA_KNOWN_APPS`.
 - **Limits**: sign-in attempts are limited per IP address (15 per 15 minutes), per Picnic account from any address (10 per 15 minutes), and for the whole server (`SIGN_IN_LIMIT_PER_MINUTE`), so that guessing passwords through this server doesn't get its IP address throttled by Picnic. Only forms that would reach Picnic count toward the last two. Someone who knows a user's email address can keep that account's sign-in blocked here for a while; the user's Picnic account itself is not affected. MCP requests are limited per signed-in user rather than per IP address, because AI apps send all their users' requests from a few addresses.
 
-Access tokens last 24 hours and refresh tokens a year, renewed on each refresh.
+Access tokens last 24 hours. A sign-in lasts 90 days: refresh tokens work until then and refreshing doesn't extend it, so a refresh token that leaks stops working by itself. After 90 days the user signs in again.
 
 ## Before you offer this to the public
 

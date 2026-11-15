@@ -40,6 +40,8 @@ export class FakePicnic {
 
   smsSent = 0;
   throttle = false;
+  /** Picnic can't be reached to sign out. */
+  down = false;
   readonly deviceIds = new Set<string>();
   readonly signedOut = new Set<string>();
   private readonly carts = new Map<string, Map<string, number>>();
@@ -126,6 +128,7 @@ export class FakePicnic {
           return { authKey: key };
         },
         logout: async () => {
+          if (this.down) throw apiError(503);
           this.signedOut.add(authed());
           return null;
         },

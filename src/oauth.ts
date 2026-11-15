@@ -3,14 +3,20 @@ import type { Response } from "express";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { InvalidClientMetadataError, InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidClientMetadataError, InvalidGrantError, InvalidTokenError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { Sealer } from "./crypto.js";
-import { isCountry, type PicnicFactory, type PicnicSession } from "./picnic.js";
+import { classifyPicnicError, isCountry, type PicnicFactory, type PicnicSession } from "./picnic.js";
 
 export const SCOPE = "picnic";
 const ACCESS_TTL = 24 * 60 * 60;
-const REFRESH_TTL = 365 * 24 * 60 * 60;
+/**
+ * How long one sign-in lasts. Refreshing doesn't extend it, so a refresh token that leaks stops
+ * working by itself, and the user signs in again after this time.
+ */
+export const SIGN_IN_TTL = 90 * 24 * 60 * 60;
+/** Refresh tokens from before sign-ins had an end lasted this long, counted from each refresh. */
+const LEGACY_REFRESH_TTL = 365 * 24 * 60 * 60;
 const CODE_TTL_MS = 2 * 60 * 1000;
 const MAX_PENDING_CODES = 20_000;
 
@@ -20,8 +26,11 @@ const REFRESH_PREFIX = "pmr_";
 
 /** A registered client as sealed into its own client id. */
 type ClientRecord = { r: string[]; n?: string; s: boolean };
-/** A Picnic session as sealed into an access or refresh token. */
-type TokenRecord = { k: string; cc: string; d: string; c: string };
+/**
+ * A Picnic session as sealed into an access or refresh token. `t` is when the user signed in, in
+ * seconds; tokens from before sign-ins had an end don't have it.
+ */
+type TokenRecord = { k: string; cc: string; d: string; c: string; t?: number };
 
 type Grant = {
   clientId: string;
@@ -202,7 +211,7 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
     if (redirectUri !== undefined && redirectUri !== grant.redirectUri) {
       throw new InvalidGrantError("redirect_uri does not match the authorization request");
     }
-    return this.issueTokens(client.client_id, grant.session);
+    return this.issueTokens(client.client_id, grant.session, Math.floor(Date.now() / 1000));
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string): Promise<OAuthTokens> {
@@ -210,7 +219,9 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
     if (!record || record.c !== client.client_id) {
       throw new InvalidGrantError("Refresh token is invalid or expired");
     }
-    return this.issueTokens(client.client_id, record.session);
+    // A token from before sign-ins had an end: count from when that token was issued.
+    const signedInAt = record.signedInAt ?? record.exp - LEGACY_REFRESH_TTL;
+    return this.issueTokens(client.client_id, record.session, signedInAt);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -233,35 +244,55 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
     const record =
       this.openToken("access", ACCESS_PREFIX, request.token) ?? this.openToken("refresh", REFRESH_PREFIX, request.token);
     if (!record || record.c !== client.client_id) return;
-    await this.signOut(record.session);
+    // Answering "revoked" while the Picnic key still works would leave the app sure of tokens that are still good.
+    if (!(await this.signOut(record.session))) {
+      throw new ServerError("Signing out at Picnic failed, so the token is still valid. Try again.");
+    }
   }
 
-  /** Signs a session out at Picnic. Never throws: a key that is already invalid is signed out too. */
+  /**
+   * Signs a session out at Picnic. True when its key no longer works: signed out now, or refused by
+   * Picnic as already invalid. False when Picnic can't be reached or answers with another error.
+   * Never throws.
+   */
   async signOut(session: PicnicSession): Promise<boolean> {
     try {
       await this.picnic(session).auth.logout();
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return classifyPicnicError(error).kind === "session";
     }
   }
 
-  private issueTokens(clientId: string, session: PicnicSession): OAuthTokens {
-    const record: TokenRecord = { k: session.authKey, cc: session.country, d: session.deviceId, c: clientId };
+  /** Tokens for a sign-in that started at `signedInAt` (in seconds); none of them outlive the sign-in. */
+  private issueTokens(clientId: string, session: PicnicSession, signedInAt: number): OAuthTokens {
+    const left = signedInAt + SIGN_IN_TTL - Math.floor(Date.now() / 1000);
+    if (left <= 0) throw new InvalidGrantError("This sign-in has ended. Sign in again.");
+    const record: TokenRecord = { k: session.authKey, cc: session.country, d: session.deviceId, c: clientId, t: signedInAt };
+    const accessTtl = Math.min(ACCESS_TTL, left);
     return {
-      access_token: ACCESS_PREFIX + this.sealer.seal("access", record, ACCESS_TTL),
+      access_token: ACCESS_PREFIX + this.sealer.seal("access", record, accessTtl),
       token_type: "bearer",
-      expires_in: ACCESS_TTL,
-      refresh_token: REFRESH_PREFIX + this.sealer.seal("refresh", record, REFRESH_TTL),
+      expires_in: accessTtl,
+      refresh_token: REFRESH_PREFIX + this.sealer.seal("refresh", record, left),
       scope: SCOPE,
     };
   }
 
-  private openToken(purpose: "access" | "refresh", prefix: string, token: string): { c: string; exp: number; session: PicnicSession } | null {
+  private openToken(
+    purpose: "access" | "refresh",
+    prefix: string,
+    token: string,
+  ): { c: string; exp: number; signedInAt: number | undefined; session: PicnicSession } | null {
     if (typeof token !== "string" || !token.startsWith(prefix)) return null;
     const record = this.sealer.open<TokenRecord>(purpose, token.slice(prefix.length));
     if (!record || typeof record.exp !== "number" || !isCountry(record.cc)) return null;
-    return { c: record.c, exp: record.exp, session: { authKey: record.k, country: record.cc, deviceId: record.d } };
+    return {
+      c: record.c,
+      exp: record.exp,
+      signedInAt: typeof record.t === "number" ? record.t : undefined,
+      session: { authKey: record.k, country: record.cc, deviceId: record.d },
+    };
   }
 }
 

@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
-import { isAllowedRedirectUri } from "../src/oauth.js";
+import { isAllowedRedirectUri, SIGN_IN_TTL } from "../src/oauth.js";
 import { FakePicnic } from "./fake-picnic.js";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -422,6 +422,38 @@ describe("tokens", () => {
     assert.equal((await call("pma_" + tokens.refresh_token.slice(4))).status, 401);
   });
 
+  it("ends a sign-in after a fixed time, however often the tokens are refreshed", async () => {
+    const sealer = new Sealer("t".repeat(48));
+    const now = Math.floor(Date.now() / 1000);
+    const day = 24 * 60 * 60;
+    const expiryOf = (refreshToken: string) => sealer.open("refresh", refreshToken.slice(4))!.exp!;
+    const refresh = (clientId: string, refreshToken: string) => token({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken });
+
+    const tokens = await connect();
+    const ends = expiryOf(tokens.refresh_token);
+    assert.ok(Math.abs(ends - (now + SIGN_IN_TTL)) < 60, "a sign-in lasts SIGN_IN_TTL");
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const refreshed = await refresh(tokens.clientId, tokens.refresh_token);
+    assert.equal(refreshed.res.status, 200);
+    assert.equal(expiryOf(refreshed.body.refresh_token), ends, "refreshing does not move the end of the sign-in");
+
+    // Tokens as this server would have issued them at other moments.
+    const record = { k: "key-1", cc: "NL", d: "DEVICE", c: tokens.clientId };
+    const issued = (fields: Record<string, unknown>, ttl: number) => "pmr_" + sealer.seal("refresh", { ...record, ...fields }, ttl);
+
+    const nearEnd = await refresh(tokens.clientId, issued({ t: now - SIGN_IN_TTL + 600 }, 600));
+    assert.equal(nearEnd.res.status, 200);
+    assert.ok(nearEnd.body.expires_in <= 600, "an access token does not outlive the sign-in");
+
+    assert.equal((await refresh(tokens.clientId, issued({ t: now - SIGN_IN_TTL - 60 }, 3600))).res.status, 400, "the sign-in has ended");
+
+    // Refresh tokens from before sign-ins had an end: valid for a year, without a sign-in time.
+    const old = await refresh(tokens.clientId, issued({}, 365 * day));
+    assert.equal(old.res.status, 200);
+    assert.ok(expiryOf(old.body.refresh_token) <= now + SIGN_IN_TTL + 60, "an old token moves onto the fixed end");
+    assert.equal((await refresh(tokens.clientId, issued({}, 365 * day - SIGN_IN_TTL - 60))).res.status, 400, "an old token issued too long ago");
+  });
+
   it("is useless with another server's secret", () => {
     const sealed = new Sealer("a".repeat(48)).seal("access", { k: "key" }, 60);
     assert.equal(new Sealer("b".repeat(48)).open("access", sealed), null);
@@ -510,6 +542,24 @@ describe("mcp", () => {
     const revoke = await fetch(`${base}/revoke`, form({ client_id: second.clientId, token: second.refresh_token }));
     assert.equal(revoke.status, 200);
     assert.equal(picnic.signedOut.size, signedOutBefore + 1);
+  });
+
+  it("reports a revocation that failed, and accepts one for a session that is already signed out", async () => {
+    const tokens = await connect();
+    const revoke = () => fetch(`${base}/revoke`, form({ client_id: tokens.clientId, token: tokens.refresh_token }));
+    const refresh = () => token({ grant_type: "refresh_token", client_id: tokens.clientId, refresh_token: tokens.refresh_token });
+
+    picnic.down = true;
+    const failed = await revoke();
+    picnic.down = false;
+    assert.equal(failed.status, 500, "the app must not be told the token is gone");
+    assert.equal(((await failed.json()) as { error: string }).error, "server_error");
+    const client = await mcp((await refresh()).body.access_token);
+    assert.equal((await client.callTool({ name: "get_cart", arguments: {} })).isError, undefined, "the session still works");
+    await client.close();
+
+    assert.equal((await revoke()).status, 200);
+    assert.equal((await revoke()).status, 200, "Picnic refuses the key, which is what revoking is for");
   });
 
   it("only speaks POST", async () => {
