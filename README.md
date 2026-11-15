@@ -10,11 +10,11 @@ Open the server's home page (`https://your-domain/`). It shows the URL to paste 
 
 | App | How |
 | --- | --- |
-| Claude (web, desktop, mobile) | Settings → Connectors → Add custom connector → paste `https://your-domain/mcp` |
-| Claude Code | `claude mcp add --transport http picnic https://your-domain/mcp`, then `/mcp` |
+| Claude (web, desktop, mobile) | Settings → Connectors → Add custom connector → paste `https://your-domain/picnic/mcp` |
+| Claude Code | `claude mcp add --transport http picnic https://your-domain/picnic/mcp`, then `/mcp` |
 | ChatGPT | Settings → Apps & Connectors → Developer mode → Create → paste the URL, OAuth |
 | Cursor, VS Code | One-click button on the home page, or the JSON snippet shown there |
-| Apps with local servers only | `npx -y mcp-remote https://your-domain/mcp` |
+| Apps with local servers only | `npx -y mcp-remote https://your-domain/picnic/mcp` |
 
 The first time, a sign-in page opens: Picnic email address, password, and the code Picnic sends by SMS.
 
@@ -59,12 +59,12 @@ Run one instance. Sign-ins in progress are held in memory for two minutes, so a 
 ## How it works
 
 ```
-AI app ──► POST /mcp  (Bearer token) ──► picnic-api ──► Picnic
+AI app ──► POST /picnic/mcp  (Bearer token) ──► picnic-api ──► Picnic
    │
    └─ first time: /register → /authorize (sign-in page) → /login → /login/verify → /token
 ```
 
-- **Transport**: Streamable HTTP at `/mcp`, without sessions. Every request stands on its own.
+- **Transport**: Streamable HTTP at `/picnic/mcp`, without sessions. Every request stands on its own. The endpoint used to live at `/mcp`; that address still serves it, so apps that were connected there keep working.
 - **Sign-in**: OAuth 2.1 with PKCE and dynamic client registration, which is what lets a user add the server by URL alone. The sign-in page passes the credentials to Picnic and handles the SMS code.
 - **No database**: the server stores nothing. A client registration is sealed into its client id, and the user's Picnic session key is sealed (AES-256-GCM) into the access and refresh token that the AI app holds. A leaked server disk contains no accounts.
 - **Passwords** are sent to Picnic once and never stored or logged. Request logs contain the method, path and status only.

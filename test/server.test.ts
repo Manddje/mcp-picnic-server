@@ -122,7 +122,7 @@ async function connect(email?: string) {
 async function mcp(accessToken: string): Promise<Client> {
   const client = new Client({ name: "test", version: "0" });
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
+    new StreamableHTTPClientTransport(new URL(`${base}/picnic/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
   );
   return client;
 }
@@ -131,13 +131,13 @@ const textOf = (result: unknown) => (result as { content: { text: string }[] }).
 
 describe("discovery", () => {
   it("tells clients where to sign in", async () => {
-    const challenge = await fetch(`${base}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const challenge = await fetch(`${base}/picnic/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     assert.equal(challenge.status, 401);
     const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge.headers.get("www-authenticate") ?? "")?.[1];
-    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/mcp`);
+    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/picnic/mcp`);
 
     const resource = (await (await fetch(metadataUrl)).json()) as { resource: string; authorization_servers: string[] };
-    assert.equal(resource.resource, `${base}/mcp`);
+    assert.equal(resource.resource, `${base}/picnic/mcp`);
 
     const as = (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
     assert.equal(as.registration_endpoint, `${base}/register`);
@@ -145,12 +145,32 @@ describe("discovery", () => {
     assert.deepEqual(as.code_challenge_methods_supported, ["S256"]);
   });
 
+  it("keeps the address from before the connectors had their own path working", async () => {
+    const challenge = await fetch(`${base}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(challenge.status, 401);
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge.headers.get("www-authenticate") ?? "")?.[1];
+    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/mcp`);
+    // An app checks that the metadata is about the address it connects to.
+    assert.equal(((await (await fetch(metadataUrl)).json()) as { resource: string }).resource, `${base}/mcp`);
+    assert.equal(((await (await fetch(`${base}/.well-known/oauth-protected-resource`)).json()) as { resource: string }).resource, `${base}/picnic/mcp`);
+
+    // One sign-in works at both addresses.
+    const { access_token } = await connect();
+    for (const path of ["/mcp", "/picnic/mcp"]) {
+      const client = new Client({ name: "test", version: "0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${base}${path}`), { requestInit: { headers: { Authorization: `Bearer ${access_token}` } } }));
+      assert.equal((await client.listTools()).tools.length, 23, path);
+      await client.close();
+    }
+    assert.equal((await fetch(`${base}/mcp`)).status, 405);
+  });
+
   it("serves the landing page in the visitor's language", async () => {
     const res = await fetch(`${base}/`, { headers: { "Accept-Language": "de" } });
     const html = await res.text();
     assert.equal(res.status, 200);
     assert.match(html, /<html lang="de">/);
-    assert.ok(html.includes(`${base}/mcp`));
+    assert.ok(html.includes(`${base}/picnic/mcp`));
     assert.match(res.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
   });
 
@@ -489,7 +509,7 @@ describe("tokens", () => {
     await (await mcp(refreshed.body.access_token)).close();
 
     const call = (bearer: string) =>
-      fetch(`${base}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: "{}" });
+      fetch(`${base}/picnic/mcp`, { method: "POST", headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: "{}" });
     const tampered = tokens.access_token.slice(0, -4) + (tokens.access_token.endsWith("AAAA") ? "BBBB" : "AAAA");
     assert.equal((await call(tampered)).status, 401);
     assert.equal((await call(tokens.refresh_token)).status, 401, "a refresh token is not an access token");
@@ -641,7 +661,7 @@ describe("mcp", () => {
 
   it("only speaks POST", async () => {
     const { access_token } = await connect();
-    const res = await fetch(`${base}/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
+    const res = await fetch(`${base}/picnic/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
     assert.equal(res.status, 405);
   });
 });
