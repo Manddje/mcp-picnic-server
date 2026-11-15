@@ -15,7 +15,8 @@ const ICON_URI = `data:image/svg+xml,${encodeURIComponent(BAND_ICON_SVG)}`;
 const THEME_COLOR = "#e1171e";
 
 const CSS = `
-:root{color-scheme:light;--bg:#f8f5f2;--card:#fff;--ink:#2e2a27;--muted:#5b534e;--line:#e9e3dc;--red:#e1171e;--red-dark:#b40117;--link:#b40117;--soft:#f3f6e9;--ok:#295813;--err:#b40117;--err-bg:#fdecec;--code:#f8f5f2;--shadow:0 8px 28px rgba(70,40,30,.1);--round:ui-rounded,"SF Pro Rounded","Arial Rounded MT Bold",Nunito,Quicksand,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+:root{--bg:#f8f5f2;--card:#fff;--ink:#2e2a27;--muted:#5b534e;--line:#e9e3dc;--red:#e1171e;--red-dark:#b40117;--link:#b40117;--soft:#f3f6e9;--ok:#295813;--err:#b40117;--err-bg:#fdecec;--code:#f8f5f2;--shadow:0 8px 28px rgba(70,40,30,.1);--round:ui-rounded,"SF Pro Rounded","Arial Rounded MT Bold",Nunito,Quicksand,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#191614;--card:#25211e;--ink:#f6f1ec;--muted:#b9b0a8;--line:#3b352f;--link:#ff8f92;--soft:#272d17;--ok:#b9d75e;--err:#ffb4ab;--err-bg:#3d1614;--code:#191614;--shadow:none}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -114,7 +115,7 @@ function sendHtml(res: Response, status: number, lang: Lang, title: string, body
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="${indexable ? "index,follow" : "noindex"}">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="${THEME_COLOR}">
 <title>${esc(title)}</title>
 ${head}
