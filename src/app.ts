@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { rateLimit } from "express-rate-limit";
@@ -12,7 +11,7 @@ import { ICON_PATHS, mcpIcons, sendIcon } from "./icons.js";
 import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding, sendMessagePage } from "./pages.js";
-import { createPicnicClient, PicnicGuard, type PicnicFactory } from "./picnic.js";
+import { createPicnicClient, PicnicGuard, userOf, type PicnicFactory } from "./picnic.js";
 import { buildMcpServer, type ServerInfo } from "./tools.js";
 
 export const VERSION = "1.1.0";
@@ -55,7 +54,12 @@ export function createApp({
 
   // One guard for everything this server sends to Picnic: sign-ins, tool calls and sign-outs.
   const picnic = picnicBehind(
-    new PicnicGuard({ limitPerMinute: config.picnicLimitPerMinute, pauseMs: config.picnicPauseSeconds * 1000, log }),
+    new PicnicGuard({
+      limitPerMinute: config.picnicLimitPerMinute,
+      userLimitPerMinute: config.picnicUserLimitPerMinute,
+      pauseMs: config.picnicPauseSeconds * 1000,
+      log,
+    }),
   );
   const sealer = new Sealer(config.secretKey);
   const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
@@ -176,7 +180,7 @@ export function createApp({
     limit: 120,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => createHash("sha256").update(sessionOf(req.auth).authKey).digest("base64url"),
+    keyGenerator: (req) => userOf(sessionOf(req.auth).authKey),
     handler: (_req, res) => rpcError(res, 429, -32000, "Too many requests. Wait a minute before trying again."),
   });
 
@@ -190,6 +194,12 @@ export function createApp({
     app.post(path, mcpCors, bearer, perUser, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
       // No sessions: every request carries its token, so any request can be served on its own.
       const session = sessionOf(req.auth);
+      // A batch would count as one request toward the limit per user while doing the work of many.
+      // MCP dropped batches in its 2025-06-18 version, and the apps this server is for don't send them.
+      if (Array.isArray(req.body)) {
+        rpcError(res, 400, -32600, "Batches are not supported. Send one message per request.");
+        return;
+      }
       const server = buildMcpServer(
         { picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) },
         serverInfo,

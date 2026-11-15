@@ -1,5 +1,5 @@
 import PicnicClient from "picnic-api";
-import type { PicnicFactory, PicnicGuard } from "../src/picnic.js";
+import { userOf, type PicnicFactory, type PicnicGuard } from "../src/picnic.js";
 
 type Cart = PicnicClient.Types.cart.Cart;
 type ProductTile = PicnicClient.Types.catalog.ProductTile;
@@ -53,6 +53,8 @@ export class FakePicnic {
   readonly factory = (guard: PicnicGuard): PicnicFactory => ({ deviceId, authKey }) => {
     this.deviceIds.add(deviceId);
     let key = authKey ?? null;
+    // Like the real client: requests count for the user the client was made for.
+    const user = authKey ? userOf(authKey) : undefined;
     const authed = () => {
       if (!key || !key.startsWith("key-") || this.signedOut.has(key)) throw apiError(401, "AUTH_ERROR");
       return key;
@@ -212,7 +214,7 @@ export class FakePicnic {
             this.requests++;
             if (this.throttle) throw apiError(403);
             return method(...args);
-          });
+          }, user);
       }
     }
     return client as unknown as PicnicClient;

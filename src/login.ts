@@ -153,6 +153,7 @@ export function createLoginRouter({
     log(`picnic sign-in failed: status=${status ?? "-"} code=${code ?? "-"}`);
     if (kind === "throttled") return { status: 429, message: t.errThrottled };
     if (kind === "busy") return { status: 429, message: t.errBusy };
+    if (kind === "over_share") return { status: 429, message: t.errTooMany };
     return { status: 502, message: t.errGeneric };
   };
 
