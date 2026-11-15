@@ -10,6 +10,7 @@ import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
 import { LANGS, STRINGS } from "../src/i18n.js";
 import { isAllowedRedirectUri, SIGN_IN_TTL } from "../src/oauth.js";
+import { createPicnicClient, PicnicGuard, PicnicHeldError } from "../src/picnic.js";
 import { FakePicnic } from "./fake-picnic.js";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -30,7 +31,15 @@ async function freePort(): Promise<number> {
 before(async () => {
   port = await freePort();
   picnic = new FakePicnic();
-  const config = loadConfig({ PORT: String(port), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false", SIGN_IN_LIMIT_PER_MINUTE: "10000" });
+  // This server serves most tests, so the limits that protect Picnic are out of their way.
+  const config = loadConfig({
+    PORT: String(port),
+    SECRET_KEY: "t".repeat(48),
+    TRUST_PROXY: "false",
+    SIGN_IN_LIMIT_PER_MINUTE: "10000",
+    PICNIC_LIMIT_PER_MINUTE: "100000",
+    PICNIC_PAUSE_SECONDS: "0",
+  });
   base = config.publicUrl.origin;
   server = createApp({ config, picnic: picnic.factory, signInAttemptLimit: 10_000, accountAttemptLimit: 10_000, log: () => {} }).listen(
     port,
@@ -90,13 +99,13 @@ async function openSignIn(clientId: string, challenge: string, { redirect = REDI
 }
 
 /** Walks the whole sign-in as a browser would and returns the authorization code. */
-async function signIn(clientId: string, challenge: string, email = "kim@example.com"): Promise<string> {
-  const page = await (await openSignIn(clientId, challenge)).text();
-  const login = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "nl", country: "NL", email, password: FakePicnic.PASSWORD }));
+async function signIn(clientId: string, challenge: string, email = "kim@example.com", at = base): Promise<string> {
+  const page = await (await openSignIn(clientId, challenge, { at })).text();
+  const login = await fetch(`${at}/login`, form({ tx: hidden(page, "tx"), lang: "nl", country: "NL", email, password: FakePicnic.PASSWORD }));
   let done = login;
   if (login.status === 200) {
     const verifyPage = await login.text();
-    done = await fetch(`${base}/login/verify`, form({ pending: hidden(verifyPage, "pending"), lang: "nl", code: FakePicnic.SMS_CODE, action: "verify" }));
+    done = await fetch(`${at}/login/verify`, form({ pending: hidden(verifyPage, "pending"), lang: "nl", code: FakePicnic.SMS_CODE, action: "verify" }));
   }
   assert.equal(done.status, 303);
   const location = new URL(done.headers.get("location")!);
@@ -105,24 +114,24 @@ async function signIn(clientId: string, challenge: string, email = "kim@example.
   return location.searchParams.get("code")!;
 }
 
-async function token(fields: Record<string, string>) {
-  const res = await fetch(`${base}/token`, form(fields));
+async function token(fields: Record<string, string>, at = base) {
+  const res = await fetch(`${at}/token`, form(fields));
   return { res, body: (await res.json()) as { access_token: string; refresh_token: string; expires_in: number; error?: string } };
 }
 
-async function connect(email?: string) {
-  const { client } = await register();
+async function connect(email?: string, at = base) {
+  const { client } = await register({}, at);
   const { verifier, challenge } = pkce();
-  const code = await signIn(client.client_id, challenge, email);
-  const { body } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT });
+  const code = await signIn(client.client_id, challenge, email, at);
+  const { body } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT }, at);
   assert.ok(body.access_token, "token endpoint returns an access token");
   return { clientId: client.client_id, ...body };
 }
 
-async function mcp(accessToken: string): Promise<Client> {
+async function mcp(accessToken: string, at = base): Promise<Client> {
   const client = new Client({ name: "test", version: "0" });
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(`${base}/picnic/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
+    new StreamableHTTPClientTransport(new URL(`${at}/picnic/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
   );
   return client;
 }
@@ -495,6 +504,9 @@ describe("settings", () => {
     assert.throws(() => loadConfig({ ...secret, UNKNOWN_APPS: "allow" }), /UNKNOWN_APPS/);
     assert.throws(() => loadConfig({ ...secret, EXTRA_KNOWN_APPS: "https://x.example/cb" }), /EXTRA_KNOWN_APPS/);
     assert.throws(() => loadConfig({ ...secret, SIGN_IN_LIMIT_PER_MINUTE: "0" }), /SIGN_IN_LIMIT_PER_MINUTE/);
+    assert.throws(() => loadConfig({ ...secret, PICNIC_LIMIT_PER_MINUTE: "0" }), /PICNIC_LIMIT_PER_MINUTE/);
+    assert.throws(() => loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "-1" }), /PICNIC_PAUSE_SECONDS/);
+    assert.equal(loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "0" }).picnicPauseSeconds, 0);
   });
 });
 
@@ -682,5 +694,102 @@ describe("mcp", () => {
     const { access_token } = await connect();
     const res = await fetch(`${base}/picnic/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
     assert.equal(res.status, 405);
+  });
+});
+
+describe("protecting the server's IP address at Picnic", () => {
+  const items = (...ids: string[]) => ({ items: ids.map((product_id) => ({ product_id })) });
+
+  it("caps the requests to Picnic for the whole server, and stops a cart change at the cap", async () => {
+    const other = await startServer({ PICNIC_LIMIT_PER_MINUTE: "4" });
+    try {
+      const sentBefore = picnic.requests;
+      const client = await mcp((await connect("no2fa@example.com", other.base)).access_token, other.base);
+      assert.equal(picnic.requests, sentBefore + 1, "signing in counts too");
+
+      const added = JSON.parse(textOf(await client.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100", "s200", "s100") })));
+      assert.equal(added.cart.item_count, 3, "what was added before the cap is reported");
+      assert.deepEqual(added.failed.map((f: { product_id: string }) => f.product_id), ["s200", "s100"]);
+      assert.match(added.failed[0].reason, /allows itself per minute/);
+      assert.match(added.failed[1].reason, /Not tried/);
+
+      const cart = await client.callTool({ name: "get_cart", arguments: {} });
+      assert.equal(cart.isError, true);
+      assert.match(textOf(cart), /allows itself per minute/);
+
+      const { client: app } = await register({}, other.base);
+      const page = await (await openSignIn(app.client_id, pkce().challenge, { at: other.base })).text();
+      const login = await fetch(`${other.base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email: "a@b.nl", password: "x" }));
+      assert.equal(login.status, 429);
+      assert.match(await login.text(), /Wait a minute and try again/);
+
+      assert.equal(picnic.requests, sentBefore + 4, "nothing went to Picnic beyond the cap");
+      await client.close();
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("stops every user's requests for a while once Picnic throttles one", async () => {
+    const other = await startServer({ PICNIC_PAUSE_SECONDS: "1" });
+    try {
+      const kim = await mcp((await connect("no2fa@example.com", other.base)).access_token, other.base);
+      const sam = await mcp((await connect("no2fa-sam@example.com", other.base)).access_token, other.base);
+      const sentBefore = picnic.requests;
+
+      picnic.throttle = true;
+      const refused = await kim.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100") });
+      picnic.throttle = false;
+      assert.equal(refused.isError, true);
+      assert.match(textOf(refused), /temporarily refusing requests/);
+      assert.equal(picnic.requests, sentBefore + 1, "the other products were not tried");
+
+      const paused = await sam.callTool({ name: "get_cart", arguments: {} });
+      assert.equal(paused.isError, true, "the pause is for the whole server");
+      assert.equal(picnic.requests, sentBefore + 1);
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      assert.equal(JSON.parse(textOf(await sam.callTool({ name: "get_cart", arguments: {} }))).item_count, 0);
+      await kim.close();
+      await sam.close();
+    } finally {
+      picnic.throttle = false;
+      await other.close();
+    }
+  });
+
+  it("guards the requests of the real Picnic client, except files from Picnic's CDN", async () => {
+    const realFetch = globalThis.fetch;
+    const sent: string[] = [];
+    let status = 403;
+    globalThis.fetch = (async (url: string) => {
+      sent.push(url);
+      return status === 200 ? Response.json({ items: [] }) : new Response("<html>blocked</html>", { status });
+    }) as typeof fetch;
+    try {
+      let time = 0;
+      const guard = new PicnicGuard({ limitPerMinute: 2, pauseMs: 30_000, now: () => time });
+      const client = createPicnicClient(guard)({ country: "NL", deviceId: "DEVICE", authKey: "key" });
+      const held = (reason: string) => (error: unknown) => error instanceof PicnicHeldError && error.reason === reason;
+
+      await assert.rejects(client.cart.getCart(), (error: unknown) => (error as { status?: number }).status === 403);
+      await assert.rejects(client.cart.getCart(), held("pause"));
+      assert.equal(sent.length, 1, "nothing is sent during the pause");
+
+      status = 200;
+      await client.sendRequest("GET", "https://cdn.example.com/chunk.js", null, { binary: true });
+      assert.equal(sent.length, 2, "the CDN is another host");
+
+      time = 30_000;
+      await client.cart.getCart();
+      await assert.rejects(client.cart.getCart(), held("limit"));
+      assert.equal(sent.length, 3, "two requests per minute, the refused one included");
+
+      time = 60_000;
+      await client.cart.getCart();
+      assert.equal(sent.length, 4);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

@@ -55,6 +55,8 @@ The public address is taken from the domain Coolify assigns (`COOLIFY_URL`). Set
 | `UNKNOWN_APPS` | no | `warn` (default) or `block`. What to do with an app that isn't a known one; see below. |
 | `EXTRA_KNOWN_APPS` | no | Comma separated host names (`app.example.com`) and app schemes (`myapp://`) to treat as known apps. |
 | `SIGN_IN_LIMIT_PER_MINUTE` | no | Sign-ins that reach Picnic per minute, for the whole server. Default `60`. |
+| `PICNIC_LIMIT_PER_MINUTE` | no | Requests of any kind that reach Picnic per minute, for the whole server. Default `300`. |
+| `PICNIC_PAUSE_SECONDS` | no | How long the server sends Picnic nothing after Picnic throttled a request. Default `60`; `0` for no pause. |
 
 Run one instance. Sign-ins in progress are held in memory for two minutes, so a second instance behind a load balancer would break some of them.
 
@@ -73,6 +75,7 @@ AI app ──► POST /picnic/mcp  (Bearer token) ──► picnic-api ──►
 - **Signing out**: revoking a token, or the `disconnect_account` tool, signs the session out at Picnic, which invalidates every token of that sign-in. When Picnic can't be reached, revoking fails with an error instead of reporting a token as revoked while it still works.
 - **Known apps**: anyone can register an app under any name, so the sign-in page only names an app when it sends the user back to a known address: Claude (`claude.ai`, `claude.com`), ChatGPT (`chatgpt.com`), VS Code (`vscode.dev`, `vscode://`), Cursor (`cursor://`) or an app on the user's own computer (`localhost`). For any other app it shows where the user will be sent and warns them to close the page if someone sent them the link. With `UNKNOWN_APPS=block` such apps are refused; add the ones you want with `EXTRA_KNOWN_APPS`.
 - **Limits**: sign-in attempts are limited per IP address (15 per 15 minutes), per Picnic account from any address (10 per 15 minutes), and for the whole server (`SIGN_IN_LIMIT_PER_MINUTE`), so that guessing passwords through this server doesn't get its IP address throttled by Picnic. Only forms that would reach Picnic count toward the last two. Someone who knows a user's email address can keep that account's sign-in blocked here for a while; the user's Picnic account itself is not affected. MCP requests are limited per signed-in user rather than per IP address, because AI apps send all their users' requests from a few addresses.
+- **Protecting the server's IP address**: every request to Picnic, from any user, passes one guard. It lets through `PICNIC_LIMIT_PER_MINUTE` requests per minute and refuses the rest without sending them. When Picnic answers a request with a throttling response (a 429, or the 403 page of its edge), the guard sends nothing for `PICNIC_PAUSE_SECONDS`, for all users, because requests sent while throttled prolong it. A cart change of many products stops at the first refusal and reports the products it didn't try. The limit is shared, so one very busy user can use it up for the others until the minute is over. Picnic doesn't publish its limits: the defaults are cautious guesses, and the log says when the limit or a pause is reached.
 
 Access tokens last 24 hours. A sign-in lasts 90 days: refresh tokens work until then and refreshing doesn't extend it, so a refresh token that leaks stops working by itself. After 90 days the user signs in again.
 

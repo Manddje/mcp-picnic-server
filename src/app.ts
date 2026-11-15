@@ -12,7 +12,7 @@ import { ICON_PATHS, mcpIcons, sendIcon } from "./icons.js";
 import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding } from "./pages.js";
-import { createPicnicClient, type PicnicFactory } from "./picnic.js";
+import { createPicnicClient, PicnicGuard, type PicnicFactory } from "./picnic.js";
 import { buildMcpServer, type ServerInfo } from "./tools.js";
 
 export const VERSION = "1.1.0";
@@ -24,8 +24,8 @@ export const OLD_MCP_PATH = "/mcp";
 
 export type AppOptions = {
   config: Config;
-  /** Creates the Picnic client for a request; replaced by a fake in tests. */
-  picnic?: PicnicFactory;
+  /** Makes the factory of Picnic clients, whose requests all pass the guard; replaced by a fake in tests. */
+  picnic?: (guard: PicnicGuard) => PicnicFactory;
   /** Sign-in attempts allowed per IP address per 15 minutes. */
   signInAttemptLimit?: number;
   /** Sign-in attempts allowed per Picnic account per 15 minutes. */
@@ -39,7 +39,7 @@ function rpcError(res: Response, status: number, code: number, message: string):
 
 export function createApp({
   config,
-  picnic = createPicnicClient,
+  picnic: picnicBehind = createPicnicClient,
   signInAttemptLimit = 15,
   accountAttemptLimit = 10,
   log = console.log,
@@ -48,6 +48,10 @@ export function createApp({
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy);
 
+  // One guard for everything this server sends to Picnic: sign-ins, tool calls and sign-outs.
+  const picnic = picnicBehind(
+    new PicnicGuard({ limitPerMinute: config.picnicLimitPerMinute, pauseMs: config.picnicPauseSeconds * 1000, log }),
+  );
   const sealer = new Sealer(config.secretKey);
   const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
   const mcpUrl = new URL(MCP_PATH, config.publicUrl);

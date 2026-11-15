@@ -21,6 +21,10 @@ export type Config = {
   unknownApps: "warn" | "block";
   /** Sign-ins that reach Picnic per minute, for the whole server, so Picnic doesn't throttle its IP address. */
   signInLimitPerMinute: number;
+  /** Requests of any kind that reach Picnic per minute, for the whole server. */
+  picnicLimitPerMinute: number;
+  /** Seconds without any request to Picnic after it throttled one; 0 for no pause. */
+  picnicPauseSeconds: number;
   /** Optional contact shown on the landing page (email address or URL). */
   contact: string | null;
   /** Optional link to the source code shown on the landing page. */
@@ -93,10 +97,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`UNKNOWN_APPS must be "warn" or "block" (got "${unknownApps}")`);
   }
 
-  const signInLimitPerMinute = Number(env.SIGN_IN_LIMIT_PER_MINUTE?.trim() || 60);
-  if (!Number.isInteger(signInLimitPerMinute) || signInLimitPerMinute < 1) {
-    throw new Error("SIGN_IN_LIMIT_PER_MINUTE must be a whole number of at least 1");
-  }
+  const wholeNumber = (name: string, fallback: number, min: number): number => {
+    const value = Number(env[name]?.trim() || fallback);
+    if (!Number.isInteger(value) || value < min) throw new Error(`${name} must be a whole number of at least ${min}`);
+    return value;
+  };
+  const signInLimitPerMinute = wholeNumber("SIGN_IN_LIMIT_PER_MINUTE", 60, 1);
+  const picnicLimitPerMinute = wholeNumber("PICNIC_LIMIT_PER_MINUTE", 300, 1);
+  const picnicPauseSeconds = wholeNumber("PICNIC_PAUSE_SECONDS", 60, 0);
 
   return {
     publicUrl,
@@ -108,6 +116,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     extraKnownApps,
     unknownApps,
     signInLimitPerMinute,
+    picnicLimitPerMinute,
+    picnicPauseSeconds,
     contact: env.CONTACT?.trim() || null,
     sourceUrl: env.SOURCE_URL?.trim() || null,
   };

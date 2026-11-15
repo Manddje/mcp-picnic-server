@@ -1,5 +1,5 @@
 import PicnicClient from "picnic-api";
-import type { PicnicFactory } from "../src/picnic.js";
+import type { PicnicFactory, PicnicGuard } from "../src/picnic.js";
 
 type Cart = PicnicClient.Types.cart.Cart;
 type ProductTile = PicnicClient.Types.catalog.ProductTile;
@@ -39,7 +39,10 @@ export class FakePicnic {
   static readonly SMS_CODE = "123456";
 
   smsSent = 0;
+  /** Picnic throttles the server: it answers every request with its edge's 403 page. */
   throttle = false;
+  /** Requests that reached Picnic. */
+  requests = 0;
   /** Picnic can't be reached to sign out. */
   down = false;
   readonly deviceIds = new Set<string>();
@@ -47,7 +50,7 @@ export class FakePicnic {
   private readonly carts = new Map<string, Map<string, number>>();
   private keys = 0;
 
-  readonly factory: PicnicFactory = ({ deviceId, authKey }) => {
+  readonly factory = (guard: PicnicGuard): PicnicFactory => ({ deviceId, authKey }) => {
     this.deviceIds.add(deviceId);
     let key = authKey ?? null;
     const authed = () => {
@@ -110,7 +113,6 @@ export class FakePicnic {
     const client = {
       auth: {
         login: async (email: string, password: string) => {
-          if (this.throttle) throw apiError(403);
           if (password !== FakePicnic.PASSWORD) throw apiError(401, "AUTH_INVALID_CRED");
           const twoFactor = !email.startsWith("no2fa");
           key = twoFactor ? `pre-${++this.keys}` : `key-${++this.keys}`;
@@ -166,6 +168,17 @@ export class FakePicnic {
         },
       },
     };
+    // Each method stands for one request to Picnic, sent through the guard like the real client's.
+    for (const service of Object.values(client) as Record<string, (...args: never[]) => Promise<unknown>>[]) {
+      for (const [name, method] of Object.entries(service)) {
+        service[name] = (...args) =>
+          guard.run(async () => {
+            this.requests++;
+            if (this.throttle) throw apiError(403);
+            return method(...args);
+          });
+      }
+    }
     return client as unknown as PicnicClient;
   };
 }
