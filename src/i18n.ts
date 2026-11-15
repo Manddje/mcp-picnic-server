@@ -18,6 +18,11 @@ const en = {
   howTitle: "Add it to your app",
   signinNote:
     "The first time you connect, a sign-in page opens. Enter your Picnic email and password, and the code Picnic texts you. That's it.",
+  addTitle: "Add it with one click",
+  addNote: "ChatGPT and Claude Code have no such link; their steps are below.",
+  claudeButton: "Add to Claude",
+  claudeAfter: "Claude opens with the name and address filled in. Confirm, then click Connect and sign in with your Picnic account.",
+  claudeManual: "Or add it by hand:",
   claudeTitle: "Claude (web, desktop and mobile)",
   claudeSteps: [
     "Open Settings → Connectors.",
@@ -110,6 +115,11 @@ const nl: Strings = {
   howTitle: "Voeg toe aan je app",
   signinNote:
     "De eerste keer opent er een inlogpagina. Vul je Picnic-e-mailadres en wachtwoord in, en de code die Picnic je sms't. Meer is het niet.",
+  addTitle: "Voeg toe met één klik",
+  addNote: "ChatGPT en Claude Code hebben zo'n link niet; de stappen staan hieronder.",
+  claudeButton: "Toevoegen aan Claude",
+  claudeAfter: "Claude opent met de naam en het adres al ingevuld. Bevestig, klik daarna op Verbinden en log in met je Picnic-account.",
+  claudeManual: "Of voeg het met de hand toe:",
   claudeTitle: "Claude (web, desktop en mobiel)",
   claudeSteps: [
     "Open Instellingen → Connectors.",
@@ -198,6 +208,11 @@ const de: Strings = {
   howTitle: "Zu deiner App hinzufügen",
   signinNote:
     "Beim ersten Verbinden öffnet sich eine Anmeldeseite. Gib deine Picnic-E-Mail-Adresse, dein Passwort und den Code ein, den Picnic dir per SMS schickt. Das war's.",
+  addTitle: "Mit einem Klick hinzufügen",
+  addNote: "ChatGPT und Claude Code haben keinen solchen Link; die Schritte stehen unten.",
+  claudeButton: "Zu Claude hinzufügen",
+  claudeAfter: "Claude öffnet sich mit bereits ausgefülltem Namen und Adresse. Bestätige, klicke dann auf Verbinden und melde dich mit deinem Picnic-Konto an.",
+  claudeManual: "Oder von Hand hinzufügen:",
   claudeTitle: "Claude (Web, Desktop und Mobil)",
   claudeSteps: [
     "Öffne Einstellungen → Connectors.",
@@ -286,6 +301,11 @@ const fr: Strings = {
   howTitle: "Ajoutez-le à votre application",
   signinNote:
     "À la première connexion, une page de connexion s'ouvre. Saisissez votre adresse e-mail et votre mot de passe Picnic, puis le code que Picnic vous envoie par SMS. C'est tout.",
+  addTitle: "Ajouter en un clic",
+  addNote: "ChatGPT et Claude Code n'ont pas de lien de ce type ; les étapes sont ci-dessous.",
+  claudeButton: "Ajouter à Claude",
+  claudeAfter: "Claude s'ouvre avec le nom et l'adresse déjà remplis. Confirmez, puis cliquez sur Connecter et connectez-vous avec votre compte Picnic.",
+  claudeManual: "Ou ajoutez-le à la main :",
   claudeTitle: "Claude (web, bureau et mobile)",
   claudeSteps: [
     "Ouvrez Paramètres → Connecteurs.",

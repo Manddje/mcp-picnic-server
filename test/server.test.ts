@@ -174,6 +174,25 @@ describe("discovery", () => {
     assert.match(res.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
   });
 
+  it("offers a button per app that can add the server from a link", async () => {
+    const html = await (await fetch(`${base}/?lang=nl`)).text();
+    const links = [...html.matchAll(/<a class="btn[^"]*" href="([^"]+)"/g)].map((m) => m[1]!.replaceAll("&amp;", "&"));
+
+    // Claude: its own link for a connector by address, with the name and address filled in.
+    const claude = new URL(links.find((l) => l.startsWith("https://claude.ai/"))!);
+    assert.equal(claude.pathname, "/customize/connectors");
+    assert.equal(claude.searchParams.get("modal"), "add-custom-connector");
+    assert.equal(claude.searchParams.get("connectorName"), "Picnic");
+    assert.equal(claude.searchParams.get("connectorUrl"), `${base}/picnic/mcp`);
+
+    const cursor = new URL(links.find((l) => l.startsWith("cursor://"))!);
+    assert.deepEqual(JSON.parse(Buffer.from(cursor.searchParams.get("config")!, "base64").toString()), { url: `${base}/picnic/mcp` });
+
+    const vscode = links.find((l) => l.startsWith("vscode:mcp/install?"))!;
+    assert.deepEqual(JSON.parse(decodeURIComponent(vscode.slice("vscode:mcp/install?".length))), { name: "picnic", type: "http", url: `${base}/picnic/mcp` });
+    assert.match(html, /Toevoegen aan Claude/);
+  });
+
   it("serves its own icon, so apps do not show the icon of the parent domain", async () => {
     const types = {
       "/favicon.ico": "image/x-icon",

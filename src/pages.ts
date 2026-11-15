@@ -34,7 +34,10 @@ h1,h2{line-height:1.2;margin:0;text-wrap:balance}
 .copyrow{display:flex;gap:8px;align-items:stretch}
 .copyrow code{flex:1;min-width:0;overflow-x:auto;white-space:nowrap;background:var(--code);border-radius:9px;padding:11px 13px;font:15px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 button,.btn{font:inherit;font-weight:600;border:0;border-radius:9px;padding:11px 16px;background:var(--accent);color:var(--accent-ink);cursor:pointer;text-decoration:none;display:inline-block;text-align:center}
-button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
+button.ghost,.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
+.add{margin-top:20px}
+.buttons{display:flex;flex-wrap:wrap;gap:8px}
+.url .fine{margin-top:10px}
 button.link{background:none;color:var(--accent);padding:0;font-weight:500;text-decoration:underline}
 button:focus-visible,.btn:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
 section{margin-top:44px}
@@ -169,6 +172,10 @@ function landingHead(lang: Lang, title: string, o: LandingOptions): string {
 export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void {
   const t = STRINGS[lang];
   const url = o.mcpUrl;
+  // Claude's own link for a connector that isn't in its directory: it opens the dialog with these
+  // two fields filled in, and the user still confirms there.
+  const claudeLink = `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Picnic&connectorUrl=${encodeURIComponent(url)}`;
+  const claudeButton = `<a class="btn" href="${esc(claudeLink)}" target="_blank" rel="noopener">${esc(t.claudeButton)}</a>`;
   const cursorConfig = Buffer.from(JSON.stringify({ url })).toString("base64");
   const cursorLink = `cursor://anysphere.cursor-deeplink/mcp/install?name=picnic&config=${encodeURIComponent(cursorConfig)}`;
   const vscodeConfig = JSON.stringify({ name: "picnic", type: "http", url });
@@ -189,12 +196,15 @@ export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void 
 <div class="card url">
 <div class="label">${esc(t.urlLabel)}</div>
 <div class="copyrow"><code id="mcp-url">${esc(url)}</code><button type="button" data-copy="mcp-url" data-done="${esc(t.copied)}">${esc(t.copy)}</button></div>
+<div class="label add">${esc(t.addTitle)}</div>
+<div class="buttons">${claudeButton}<a class="btn ghost" href="${esc(cursorLink)}">${esc(t.cursorButton)}</a><a class="btn ghost" href="${esc(vscodeLink)}">${esc(t.vscodeButton)}</a></div>
+<p class="fine">${esc(t.addNote)}</p>
 </div>
 
 <section>
 <h2>${esc(t.howTitle)}</h2>
 <p class="note">${esc(t.signinNote)}</p>
-<details open><summary>${esc(t.claudeTitle)}</summary><div>${steps(t.claudeSteps)}</div></details>
+<details open><summary>${esc(t.claudeTitle)}</summary><div><p>${claudeButton}</p><p>${esc(t.claudeAfter)}</p><p>${esc(t.claudeManual)}</p>${steps(t.claudeSteps)}</div></details>
 <details><summary>${esc(t.claudeCodeTitle)}</summary><div><pre>claude mcp add --transport http picnic ${esc(url)}</pre><p>${esc(t.claudeCodeAfter)}</p></div></details>
 <details><summary>${esc(t.chatgptTitle)}</summary><div>${steps(t.chatgptSteps)}</div></details>
 <details><summary>${esc(t.cursorTitle)}</summary><div><p><a class="btn" href="${esc(cursorLink)}">${esc(t.cursorButton)}</a></p><p>${esc(t.cursorManual)}</p><pre>${esc(cursorJson)}</pre></div></details>

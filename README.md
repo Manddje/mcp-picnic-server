@@ -10,10 +10,12 @@ Open the server's home page (`https://your-domain/`). It shows the URL to paste 
 
 | App | How |
 | --- | --- |
-| Claude (web, desktop, mobile) | Settings → Connectors → Add custom connector → paste `https://your-domain/picnic/mcp` |
+| Claude (web, desktop, mobile) | One-click button on the home page, which opens Claude's “Add custom connector” dialog with the name and address filled in. By hand: Settings → Connectors → Add custom connector → paste `https://your-domain/picnic/mcp` |
 | Claude Code | `claude mcp add --transport http picnic https://your-domain/picnic/mcp`, then `/mcp` |
 | ChatGPT | Settings → Apps & Connectors → Developer mode → Create → paste the URL, OAuth |
 | Cursor, VS Code | One-click button on the home page, or the JSON snippet shown there |
+
+Claude, Cursor and VS Code each have a link that adds a server; the home page turns those into buttons. ChatGPT and Claude Code have no such link, so they stay a few manual steps.
 | Apps with local servers only | `npx -y mcp-remote https://your-domain/picnic/mcp` |
 
 The first time, a sign-in page opens: Picnic email address, password, and the code Picnic sends by SMS.
