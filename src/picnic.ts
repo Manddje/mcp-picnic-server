@@ -16,19 +16,110 @@ export type PicnicSession = {
   deviceId: string;
 };
 
+/** Creates the Picnic client for one user. */
 export type PicnicFactory = (options: { country: Country; deviceId: string; authKey?: string }) => PicnicClient;
 
-export const createPicnicClient: PicnicFactory = ({ country, deviceId, authKey }) =>
-  new PicnicClient({ countryCode: country, deviceId, authKey });
+const MINUTE = 60 * 1000;
+
+/** Why a request was not sent to Picnic: this server's own limit is used up, or Picnic is throttling. */
+export class PicnicHeldError extends Error {
+  constructor(
+    readonly reason: "limit" | "pause",
+    readonly retryAfterSeconds: number,
+  ) {
+    super(`Not sent to Picnic (${reason}); try again in ${retryAfterSeconds}s`);
+    this.name = "PicnicHeldError";
+  }
+}
+
+/**
+ * Stands between the whole server and Picnic. Every user reaches Picnic from this server's IP
+ * address, so once Picnic throttles that address everyone is locked out. The guard keeps the server
+ * under a number of requests per minute, and stops all requests for a while as soon as Picnic
+ * answers one with a throttling response, because requests sent while throttled prolong it.
+ */
+export class PicnicGuard {
+  private windowStart = 0;
+  private sent = 0;
+  private limitLogged = false;
+  private pausedUntil = 0;
+
+  constructor(
+    private readonly options: {
+      /** Requests that reach Picnic per minute, for the whole server. */
+      limitPerMinute: number;
+      /** How long no request goes to Picnic after it throttled one; 0 for no pause. */
+      pauseMs: number;
+      log?: (message: string) => void;
+      now?: () => number;
+    },
+  ) {}
+
+  /** Sends one request to Picnic, or throws a {@link PicnicHeldError} without sending it. */
+  async run<T>(send: () => Promise<T>): Promise<T> {
+    const { limitPerMinute, pauseMs, log, now = Date.now } = this.options;
+    const time = now();
+    if (time < this.pausedUntil) throw new PicnicHeldError("pause", Math.ceil((this.pausedUntil - time) / 1000));
+    if (time - this.windowStart >= MINUTE) {
+      this.windowStart = time;
+      this.sent = 0;
+      this.limitLogged = false;
+    }
+    if (this.sent >= limitPerMinute) {
+      if (!this.limitLogged) log?.(`picnic request limit reached (${limitPerMinute} per minute): holding requests`);
+      this.limitLogged = true;
+      throw new PicnicHeldError("limit", Math.ceil((this.windowStart + MINUTE - time) / 1000));
+    }
+    this.sent++;
+    try {
+      return await send();
+    } catch (error) {
+      const { kind, status } = classifyPicnicError(error);
+      if (kind === "throttled" && pauseMs > 0) {
+        if (now() >= this.pausedUntil) log?.(`picnic is throttling (status ${status}): no requests for ${Math.round(pauseMs / 1000)}s`);
+        this.pausedUntil = now() + pauseMs;
+      }
+      throw error;
+    }
+  }
+}
+
+type SendArgs = Parameters<PicnicClient["sendRequestWithHeaders"]>;
+
+/** A Picnic client whose requests to Picnic's API all pass the guard. */
+class GuardedPicnicClient extends PicnicClient {
+  constructor(
+    options: ConstructorParameters<typeof PicnicClient>[0],
+    private readonly guard: PicnicGuard,
+  ) {
+    super(options);
+  }
+
+  // Every request of the library goes through this method, including the several that one call can take.
+  override sendRequestWithHeaders<TRequestData, TResponseData>(method: SendArgs[0], path: string, data?: TRequestData | null, options?: SendArgs[3]) {
+    const send = () => super.sendRequestWithHeaders<TRequestData, TResponseData>(method, path, data, options);
+    // Page scripts come from Picnic's CDN, which is another host with its own limits.
+    const elsewhere = /^https?:\/\//.test(path) && new URL(path).origin !== new URL(this.url).origin;
+    return elsewhere ? send() : this.guard.run(send);
+  }
+}
+
+/** The factory for real Picnic clients, all behind one guard. */
+export const createPicnicClient =
+  (guard: PicnicGuard): PicnicFactory =>
+  ({ country, deviceId, authKey }) =>
+    new GuardedPicnicClient({ countryCode: country, deviceId, authKey }, guard);
 
 export function newDeviceId(): string {
   return randomBytes(8).toString("hex").toUpperCase();
 }
 
-export type PicnicErrorKind = "credentials" | "code" | "session" | "throttled" | "not_found" | "other";
+/** "throttled": Picnic refuses requests. "busy": this server has used up its own requests for this minute. */
+export type PicnicErrorKind = "credentials" | "code" | "session" | "throttled" | "busy" | "not_found" | "other";
 
 /** Sorts an error from picnic-api into the few cases the server treats differently. */
 export function classifyPicnicError(error: unknown): { kind: PicnicErrorKind; status: number | null; code: string | null } {
+  if (error instanceof PicnicHeldError) return { kind: error.reason === "pause" ? "throttled" : "busy", status: null, code: null };
   if (PicnicClient.isProductNotFoundError(error)) return { kind: "not_found", status: 404, code: null };
   if (!PicnicClient.isPicnicApiError(error)) return { kind: "other", status: null, code: null };
   const { status, code } = error;

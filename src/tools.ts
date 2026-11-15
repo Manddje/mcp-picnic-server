@@ -34,6 +34,8 @@ function explain(error: unknown): string {
       return SESSION_EXPIRED;
     case "throttled":
       return "Picnic is temporarily refusing requests. Wait a minute before trying again.";
+    case "busy":
+      return "This server has sent Picnic as many requests as it allows itself per minute. Wait a minute before trying again.";
     case "not_found":
       return "Not found. The id doesn't exist, or the product isn't available at the user's address.";
     default: {
@@ -230,12 +232,18 @@ export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
   async function changeCart(items: z.infer<typeof cartItems>, change: (id: string, count: number) => Promise<PicnicClient.Types.cart.Cart>) {
     let latest: PicnicClient.Types.cart.Cart | null = null;
     const failed: { product_id: string; reason: string }[] = [];
-    for (const item of items) {
+    for (const [index, item] of items.entries()) {
       try {
         latest = await change(item.product_id, item.quantity);
       } catch (error) {
-        if (classifyPicnicError(error).kind === "session") throw error;
+        const { kind } = classifyPicnicError(error);
+        if (kind === "session") throw error;
         failed.push({ product_id: item.product_id, reason: explain(error) });
+        if (kind === "throttled" || kind === "busy") {
+          // The rest would be refused too, and requests sent while Picnic throttles prolong it.
+          for (const rest of items.slice(index + 1)) failed.push({ product_id: rest.product_id, reason: "Not tried, because of the error above." });
+          break;
+        }
       }
     }
     return { failed, cart: fmt.cart(latest ?? (await picnic.cart.getCart())) };

@@ -1,9 +1,9 @@
 import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import { rateLimit, type RateLimitRequestHandler } from "express-rate-limit";
 import type { Sealer } from "./crypto.js";
-import { pickLang, STRINGS, type Lang } from "./i18n.js";
+import { isLang, pickLang, STRINGS, type Lang } from "./i18n.js";
 import type { PicnicOAuthProvider } from "./oauth.js";
-import { sendLoginPage, sendMessagePage, sendVerifyPage } from "./pages.js";
+import { describeRedirect, sendLoginPage, sendMessagePage, sendReturnPage, sendVerifyPage } from "./pages.js";
 import { classifyPicnicError, isCountry, newDeviceId, type Country, type PicnicFactory, type PicnicSession } from "./picnic.js";
 
 const TX_TTL = 30 * 60;
@@ -11,8 +11,11 @@ const PENDING_TTL = 10 * 60;
 
 /** The authorization request, carried through the sign-in forms in a sealed hidden field. */
 type Tx = { c: string; r: string; ch: string; s?: string };
-/** A sign-in waiting for its SMS code: the request plus Picnic's not yet verified key and the account it is for. */
-type Pending = Tx & { k: string; cc: string; d: string; a: string };
+/**
+ * A sign-in waiting for its SMS code: the request plus Picnic's not yet verified key and the account
+ * it is for (`a` for the limits, `e` to show the user; sign-ins from before the page showed it lack `e`).
+ */
+type Pending = Tx & { k: string; cc: string; d: string; a: string; e?: string };
 
 /** A sign-in form that passed its checks and is about to go to Picnic; set on res.locals.attempt. */
 type Attempt = {
@@ -121,13 +124,26 @@ export function createLoginRouter({
 
   /* ---------- Sign-in ---------- */
 
-  const finish = (res: Response, tx: Tx, session: PicnicSession) => {
-    const code = provider.issueCode({ clientId: tx.c, redirectUri: tx.r, codeChallenge: tx.ch, session });
+  /**
+   * Sends the user back to their app with the answer to its request. A web address or an app on
+   * this computer shows a page of its own. An app with its own scheme (cursor://) doesn't: the
+   * browser would stay on the form that was just sent, so it gets a page that opens the app and
+   * says the tab is done with.
+   */
+  const leave = (req: Request, res: Response, tx: Tx, outcome: "done" | "cancelled", answer: Record<string, string>) => {
     const target = new URL(tx.r);
-    target.searchParams.set("code", code);
+    for (const [name, value] of Object.entries(answer)) target.searchParams.set(name, value);
     if (tx.s) target.searchParams.set("state", tx.s);
     res.setHeader("Cache-Control", "no-store");
-    res.redirect(303, target.href);
+    if (target.protocol === "https:" || target.protocol === "http:") return res.redirect(303, target.href);
+    const lang = pickLang(req);
+    const name = verified(tx.r) ? provider.clientsStore.getClient(tx.c)?.client_name : undefined;
+    sendReturnPage(res, { serviceName, lang, outcome, app: name || describeRedirect(tx.r, STRINGS[lang]), href: target.href });
+  };
+
+  const finish = (req: Request, res: Response, tx: Tx, session: PicnicSession) => {
+    const code = provider.issueCode({ clientId: tx.c, redirectUri: tx.r, codeChallenge: tx.ch, session });
+    leave(req, res, tx, "done", { code });
   };
 
   const loginError = (error: unknown, t: (typeof STRINGS)[Lang]): { status: number; message: string } => {
@@ -136,10 +152,43 @@ export function createLoginRouter({
     if (kind === "code") return { status: 401, message: t.errCode };
     log(`picnic sign-in failed: status=${status ?? "-"} code=${code ?? "-"}`);
     if (kind === "throttled") return { status: 429, message: t.errThrottled };
+    if (kind === "busy") return { status: 429, message: t.errBusy };
     return { status: 502, message: t.errGeneric };
   };
 
   type LoginForm = { tx: Tx; country: Country; email: string; password: string };
+
+  const emailOf = (body: Record<string, unknown>) => (typeof body.email === "string" ? body.email.trim().slice(0, 254) : "");
+
+  /**
+   * The buttons on the sign-in form that ask Picnic nothing: another language, and Cancel. They
+   * don't count as sign-in attempts. Anything that isn't in order is left to the checks below.
+   */
+  const loginAside = (req: Request, res: Response, next: NextFunction) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const cancel = body.action === "cancel";
+    if (!cancel && !isLang(body.setlang)) return next();
+    const tx = sealer.open<Tx>("tx", body.tx);
+    const client = tx && provider.clientsStore.getClient(tx.c);
+    if (!tx || !client) return next();
+
+    if (cancel) {
+      // Only to an app the page vouched for; for any other app the page told the user to close it.
+      if (!verified(tx.r)) return next();
+      return leave(req, res, tx, "cancelled", { error: "access_denied", error_description: "The user cancelled the sign-in" });
+    }
+    const lang = body.setlang as Lang;
+    sendLoginPage(res, 200, {
+      serviceName,
+      lang,
+      tx: body.tx as string,
+      clientName: client.client_name,
+      redirectUri: tx.r,
+      verified: verified(tx.r),
+      country: isCountry(body.country) ? body.country : DEFAULT_COUNTRY[lang],
+      email: emailOf(body),
+    });
+  };
 
   /** Checks the sign-in form before anything goes to Picnic. */
   const checkLogin = (req: Request, res: Response, next: NextFunction) => {
@@ -150,7 +199,7 @@ export function createLoginRouter({
 
     const lang = pickLang(req);
     const country = isCountry(body.country) ? body.country : DEFAULT_COUNTRY[lang];
-    const email = typeof body.email === "string" ? body.email.trim().slice(0, 254) : "";
+    const email = emailOf(body);
     const password = typeof body.password === "string" ? body.password : "";
     const retry = (status: number, error: string) =>
       sendLoginPage(res, status, {
@@ -171,7 +220,7 @@ export function createLoginRouter({
     next();
   };
 
-  router.post("/login", form, perIp, checkLogin, ...limited, async (req, res) => {
+  router.post("/login", form, loginAside, perIp, checkLogin, ...limited, async (req, res) => {
     const { tx, country, email, password } = res.locals.login as LoginForm;
     const { account, retry } = attemptOf(res);
     const t = STRINGS[pickLang(req)];
@@ -181,11 +230,11 @@ export function createLoginRouter({
       const api = picnic({ country, deviceId });
       const result = await api.auth.login(email, password);
       if (!result.secondFactorAuthenticationRequired) {
-        return finish(res, tx, { authKey: result.authKey, country, deviceId });
+        return finish(req, res, tx, { authKey: result.authKey, country, deviceId });
       }
       await api.auth.generate2FACode("SMS");
-      const pending: Pending = { ...tx, k: result.authKey, cc: country, d: deviceId, a: account };
-      sendVerifyPage(res, 200, { serviceName, lang: pickLang(req), pending: sealer.seal("pending", pending, PENDING_TTL) });
+      const pending: Pending = { ...tx, k: result.authKey, cc: country, d: deviceId, a: account, e: email };
+      sendVerifyPage(res, 200, { serviceName, lang: pickLang(req), pending: sealer.seal("pending", pending, PENDING_TTL), email });
     } catch (error) {
       const { status, message } = loginError(error, t);
       retry(status, message);
@@ -196,6 +245,34 @@ export function createLoginRouter({
 
   type VerifyForm = { pending: Pending & { cc: Country }; action: "resend" | "verify"; code: string };
 
+  /**
+   * The buttons on the code form that ask Picnic nothing: another language, and going back to sign
+   * in with a different account. They don't count as attempts.
+   */
+  const verifyAside = (req: Request, res: Response, next: NextFunction) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const back = body.action === "back";
+    if (!back && !isLang(body.setlang)) return next();
+    const pending = sealer.open<Pending>("pending", body.pending);
+    const client = pending && provider.clientsStore.getClient(pending.c);
+    if (!pending || !client || !isCountry(pending.cc)) return next();
+
+    if (back) {
+      const lang = pickLang(req);
+      const tx: Tx = { c: pending.c, r: pending.r, ch: pending.ch, ...(pending.s ? { s: pending.s } : {}) };
+      return sendLoginPage(res, 200, {
+        serviceName,
+        lang,
+        tx: sealer.seal("tx", tx, TX_TTL),
+        clientName: client.client_name,
+        redirectUri: tx.r,
+        verified: verified(tx.r),
+        country: pending.cc,
+      });
+    }
+    sendVerifyPage(res, 200, { serviceName, lang: body.setlang as Lang, pending: body.pending as string, email: pending.e });
+  };
+
   /** Checks the code form before anything goes to Picnic. Resending a code counts as an attempt too. */
   const checkVerify = (req: Request, res: Response, next: NextFunction) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -204,7 +281,7 @@ export function createLoginRouter({
 
     const lang = pickLang(req);
     const show = (status: number, message: { error?: string; info?: string }) =>
-      sendVerifyPage(res, status, { serviceName, lang, pending: body.pending as string, ...message });
+      sendVerifyPage(res, status, { serviceName, lang, pending: body.pending as string, email: pending.e, ...message });
     const action = body.action === "resend" ? "resend" : "verify";
     const code = typeof body.code === "string" ? body.code.replace(/\D/g, "") : "";
     if (action === "verify" && (!code || code.length > 10)) return show(400, { error: STRINGS[lang].errCodeMissing });
@@ -215,7 +292,7 @@ export function createLoginRouter({
     next();
   };
 
-  router.post("/login/verify", form, perIp, checkVerify, ...limited, async (req, res) => {
+  router.post("/login/verify", form, verifyAside, perIp, checkVerify, ...limited, async (req, res) => {
     const { pending, action, code } = res.locals.verify as VerifyForm;
     const show = res.locals.show as (status: number, message: { error?: string; info?: string }) => void;
     const t = STRINGS[pickLang(req)];
@@ -227,7 +304,7 @@ export function createLoginRouter({
         return show(200, { info: t.resent });
       }
       const result = await api.auth.verify2FACode(code);
-      finish(res, pending, { authKey: result.authKey || pending.k, country: pending.cc, deviceId: pending.d });
+      finish(req, res, pending, { authKey: result.authKey || pending.k, country: pending.cc, deviceId: pending.d });
     } catch (error) {
       const { status, message } = loginError(error, t);
       show(status, { error: message });

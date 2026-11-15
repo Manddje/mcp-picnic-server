@@ -10,6 +10,7 @@ import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
 import { LANGS, STRINGS } from "../src/i18n.js";
 import { isAllowedRedirectUri, SIGN_IN_TTL } from "../src/oauth.js";
+import { createPicnicClient, PicnicGuard, PicnicHeldError } from "../src/picnic.js";
 import { FakePicnic } from "./fake-picnic.js";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -30,7 +31,15 @@ async function freePort(): Promise<number> {
 before(async () => {
   port = await freePort();
   picnic = new FakePicnic();
-  const config = loadConfig({ PORT: String(port), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false", SIGN_IN_LIMIT_PER_MINUTE: "10000" });
+  // This server serves most tests, so the limits that protect Picnic are out of their way.
+  const config = loadConfig({
+    PORT: String(port),
+    SECRET_KEY: "t".repeat(48),
+    TRUST_PROXY: "false",
+    SIGN_IN_LIMIT_PER_MINUTE: "10000",
+    PICNIC_LIMIT_PER_MINUTE: "100000",
+    PICNIC_PAUSE_SECONDS: "0",
+  });
   base = config.publicUrl.origin;
   server = createApp({ config, picnic: picnic.factory, signInAttemptLimit: 10_000, accountAttemptLimit: 10_000, log: () => {} }).listen(
     port,
@@ -90,13 +99,13 @@ async function openSignIn(clientId: string, challenge: string, { redirect = REDI
 }
 
 /** Walks the whole sign-in as a browser would and returns the authorization code. */
-async function signIn(clientId: string, challenge: string, email = "kim@example.com"): Promise<string> {
-  const page = await (await openSignIn(clientId, challenge)).text();
-  const login = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "nl", country: "NL", email, password: FakePicnic.PASSWORD }));
+async function signIn(clientId: string, challenge: string, email = "kim@example.com", at = base): Promise<string> {
+  const page = await (await openSignIn(clientId, challenge, { at })).text();
+  const login = await fetch(`${at}/login`, form({ tx: hidden(page, "tx"), lang: "nl", country: "NL", email, password: FakePicnic.PASSWORD }));
   let done = login;
   if (login.status === 200) {
     const verifyPage = await login.text();
-    done = await fetch(`${base}/login/verify`, form({ pending: hidden(verifyPage, "pending"), lang: "nl", code: FakePicnic.SMS_CODE, action: "verify" }));
+    done = await fetch(`${at}/login/verify`, form({ pending: hidden(verifyPage, "pending"), lang: "nl", code: FakePicnic.SMS_CODE, action: "verify" }));
   }
   assert.equal(done.status, 303);
   const location = new URL(done.headers.get("location")!);
@@ -105,24 +114,24 @@ async function signIn(clientId: string, challenge: string, email = "kim@example.
   return location.searchParams.get("code")!;
 }
 
-async function token(fields: Record<string, string>) {
-  const res = await fetch(`${base}/token`, form(fields));
+async function token(fields: Record<string, string>, at = base) {
+  const res = await fetch(`${at}/token`, form(fields));
   return { res, body: (await res.json()) as { access_token: string; refresh_token: string; expires_in: number; error?: string } };
 }
 
-async function connect(email?: string) {
-  const { client } = await register();
+async function connect(email?: string, at = base) {
+  const { client } = await register({}, at);
   const { verifier, challenge } = pkce();
-  const code = await signIn(client.client_id, challenge, email);
-  const { body } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT });
+  const code = await signIn(client.client_id, challenge, email, at);
+  const { body } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT }, at);
   assert.ok(body.access_token, "token endpoint returns an access token");
   return { clientId: client.client_id, ...body };
 }
 
-async function mcp(accessToken: string): Promise<Client> {
+async function mcp(accessToken: string, at = base): Promise<Client> {
   const client = new Client({ name: "test", version: "0" });
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
+    new StreamableHTTPClientTransport(new URL(`${at}/picnic/mcp`), { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } }),
   );
   return client;
 }
@@ -131,13 +140,13 @@ const textOf = (result: unknown) => (result as { content: { text: string }[] }).
 
 describe("discovery", () => {
   it("tells clients where to sign in", async () => {
-    const challenge = await fetch(`${base}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const challenge = await fetch(`${base}/picnic/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     assert.equal(challenge.status, 401);
     const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge.headers.get("www-authenticate") ?? "")?.[1];
-    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/mcp`);
+    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/picnic/mcp`);
 
     const resource = (await (await fetch(metadataUrl)).json()) as { resource: string; authorization_servers: string[] };
-    assert.equal(resource.resource, `${base}/mcp`);
+    assert.equal(resource.resource, `${base}/picnic/mcp`);
 
     const as = (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
     assert.equal(as.registration_endpoint, `${base}/register`);
@@ -145,13 +154,52 @@ describe("discovery", () => {
     assert.deepEqual(as.code_challenge_methods_supported, ["S256"]);
   });
 
+  it("keeps the address from before the connectors had their own path working", async () => {
+    const challenge = await fetch(`${base}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(challenge.status, 401);
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge.headers.get("www-authenticate") ?? "")?.[1];
+    assert.equal(metadataUrl, `${base}/.well-known/oauth-protected-resource/mcp`);
+    // An app checks that the metadata is about the address it connects to.
+    assert.equal(((await (await fetch(metadataUrl)).json()) as { resource: string }).resource, `${base}/mcp`);
+    assert.equal(((await (await fetch(`${base}/.well-known/oauth-protected-resource`)).json()) as { resource: string }).resource, `${base}/picnic/mcp`);
+
+    // One sign-in works at both addresses.
+    const { access_token } = await connect();
+    for (const path of ["/mcp", "/picnic/mcp"]) {
+      const client = new Client({ name: "test", version: "0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${base}${path}`), { requestInit: { headers: { Authorization: `Bearer ${access_token}` } } }));
+      assert.equal((await client.listTools()).tools.length, 23, path);
+      await client.close();
+    }
+    assert.equal((await fetch(`${base}/mcp`)).status, 405);
+  });
+
   it("serves the landing page in the visitor's language", async () => {
     const res = await fetch(`${base}/`, { headers: { "Accept-Language": "de" } });
     const html = await res.text();
     assert.equal(res.status, 200);
     assert.match(html, /<html lang="de">/);
-    assert.ok(html.includes(`${base}/mcp`));
+    assert.ok(html.includes(`${base}/picnic/mcp`));
     assert.match(res.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  });
+
+  it("offers a button per app that can add the server from a link", async () => {
+    const html = await (await fetch(`${base}/?lang=nl`)).text();
+    const links = [...html.matchAll(/<a class="btn[^"]*" href="([^"]+)"/g)].map((m) => m[1]!.replaceAll("&amp;", "&"));
+
+    // Claude: its own link for a connector by address, with the name and address filled in.
+    const claude = new URL(links.find((l) => l.startsWith("https://claude.ai/"))!);
+    assert.equal(claude.pathname, "/customize/connectors");
+    assert.equal(claude.searchParams.get("modal"), "add-custom-connector");
+    assert.equal(claude.searchParams.get("connectorName"), "Picnic");
+    assert.equal(claude.searchParams.get("connectorUrl"), `${base}/picnic/mcp`);
+
+    const cursor = new URL(links.find((l) => l.startsWith("cursor://"))!);
+    assert.deepEqual(JSON.parse(Buffer.from(cursor.searchParams.get("config")!, "base64").toString()), { url: `${base}/picnic/mcp` });
+
+    const vscode = links.find((l) => l.startsWith("vscode:mcp/install?"))!;
+    assert.deepEqual(JSON.parse(decodeURIComponent(vscode.slice("vscode:mcp/install?".length))), { name: "picnic", type: "http", url: `${base}/picnic/mcp` });
+    assert.match(html, /Toevoegen aan Claude/);
   });
 
   it("serves its own icon, so apps do not show the icon of the parent domain", async () => {
@@ -232,7 +280,7 @@ describe("discovery", () => {
     const targets = [...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]!);
     assert.deepEqual(targets, ["mcp-url", "snip-claude-code", "snip-cursor", "snip-vscode", "snip-other"]);
     for (const id of targets) assert.ok(html.includes(`id="${id}"`), `${id} is on the page`);
-    assert.match(html, /<pre id="snip-claude-code">claude mcp add --transport http picnic http:\/\/localhost:\d+\/mcp<\/pre>/);
+    assert.match(html, /<pre id="snip-claude-code">claude mcp add --transport http picnic http:\/\/localhost:\d+\/picnic\/mcp<\/pre>/);
     assert.match(html, /role="status" id="copy-status"/, "copying is announced to screen readers");
   });
 
@@ -240,9 +288,11 @@ describe("discovery", () => {
     const browser = { headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "nl" }, redirect: "manual" as const };
 
     // Someone pasted the server URL into the address bar.
-    const pasted = await fetch(`${base}/mcp`, browser);
-    assert.equal(pasted.status, 302);
-    assert.equal(pasted.headers.get("location"), "/");
+    for (const path of ["/picnic/mcp", "/mcp"]) {
+      const pasted = await fetch(base + path, browser);
+      assert.equal(pasted.status, 302, path);
+      assert.equal(pasted.headers.get("location"), "/");
+    }
 
     const missing = await fetch(`${base}/nope`, browser);
     assert.equal(missing.status, 404);
@@ -331,6 +381,148 @@ describe("sign-in", () => {
       assert.match(html, /<strong>Some App<\/strong> wants to connect/, redirect);
       assert.ok(!html.includes("known apps"), redirect);
     }
+  });
+
+  it("says on the sign-in page itself that the service is not Picnic's", async () => {
+    const { client } = await register();
+    const page = await (await openSignIn(client.client_id, pkce().challenge, { lang: "en" })).text();
+    const notice = page.indexOf('<p class="unofficial">Unofficial service.');
+    assert.ok(notice > 0 && notice < page.indexOf("<form"), "above the form, not under the card");
+  });
+
+  it("lets the user cancel, which tells the app so", async () => {
+    const { client } = await register();
+    const page = await (await openSignIn(client.client_id, pkce().challenge)).text();
+    assert.match(page, /<button type="submit" name="action" value="cancel" class="ghost" formnovalidate>Annuleren<\/button>/);
+    const res = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "nl", action: "cancel" }));
+    assert.equal(res.status, 303);
+    const location = new URL(res.headers.get("location")!);
+    assert.equal(location.origin + location.pathname, REDIRECT);
+    assert.equal(location.searchParams.get("error"), "access_denied");
+    assert.equal(location.searchParams.get("state"), "st4te");
+    assert.equal(location.searchParams.get("code"), null);
+  });
+
+  it("does not offer Cancel for an unknown app, and does not send the user there", async () => {
+    const redirect = "https://assistant.example/callback";
+    const { client } = await register({ redirect_uris: [redirect] });
+    const page = await (await openSignIn(client.client_id, pkce().challenge, { redirect })).text();
+    assert.ok(!page.includes('value="cancel"'));
+    const res = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "en", action: "cancel" }));
+    assert.equal(res.status, 400);
+    assert.equal(res.headers.get("location"), null);
+  });
+
+  it("switches language on every step without losing the sign-in or asking Picnic again", async () => {
+    const { client } = await register();
+    const { verifier, challenge } = pkce();
+    const first = await (await openSignIn(client.client_id, challenge)).text();
+    assert.match(first, /<nav class="langs" aria-label="Taal"><a href="\/authorize\?[^"]*lang=en"/, "the first page has an address, so links");
+
+    // After a wrong password the page is the answer to a form: the language buttons post its state back.
+    const wrong = await (await fetch(`${base}/login`, form({ tx: hidden(first, "tx"), lang: "nl", country: "DE", email: "kim@example.com", password: "nope" }))).text();
+    assert.match(wrong, /<nav class="langs" aria-label="Taal"><form method="post" action="\/login">/);
+    assert.match(wrong, /<button type="submit" name="setlang" value="de" lang="de" title="Deutsch">DE<\/button>/);
+    const german = await fetch(`${base}/login`, form({ tx: hidden(wrong, "tx"), country: "DE", email: "kim@example.com", setlang: "de" }));
+    assert.equal(german.status, 200);
+    const germanPage = await german.text();
+    assert.match(germanPage, /<html lang="de">/);
+    assert.match(germanPage, /Mit Picnic anmelden/);
+    assert.match(germanPage, /value="kim@example.com"/, "keeps the email address");
+    assert.match(germanPage, /<option value="DE" selected>/, "keeps the country");
+    assert.ok(!germanPage.includes('class="alert"'), "the old message was in the other language");
+
+    const sentBefore = picnic.smsSent;
+    const login = await fetch(`${base}/login`, form({ tx: hidden(germanPage, "tx"), lang: "de", country: "DE", email: "kim@example.com", password: FakePicnic.PASSWORD }));
+    const codePage = await login.text();
+    assert.match(codePage, /Schau auf dein Handy/);
+    const french = await fetch(`${base}/login/verify`, form({ pending: hidden(codePage, "pending"), setlang: "fr" }));
+    const frenchPage = await french.text();
+    assert.equal(french.status, 200);
+    assert.match(frenchPage, /Regardez votre téléphone/);
+    assert.equal(picnic.smsSent, sentBefore + 1, "no new code is sent for a change of language");
+
+    const done = await fetch(`${base}/login/verify`, form({ pending: hidden(frenchPage, "pending"), lang: "fr", code: FakePicnic.SMS_CODE, action: "verify" }));
+    assert.equal(done.status, 303);
+    const code = new URL(done.headers.get("location")!).searchParams.get("code")!;
+    const { res } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT });
+    assert.equal(res.status, 200);
+  });
+
+  it("does not count language changes and cancelling as sign-in attempts", async () => {
+    const limited = await startServer({}, { signInAttemptLimit: 2 });
+    try {
+      const { client } = await register({}, limited.base);
+      const page = await (await openSignIn(client.client_id, pkce().challenge, { at: limited.base })).text();
+      for (let i = 0; i < 5; i++) {
+        const res = await fetch(`${limited.base}/login`, form({ tx: hidden(page, "tx"), setlang: "en" }));
+        assert.equal(res.status, 200);
+      }
+      assert.equal((await fetch(`${limited.base}/login`, form({ tx: hidden(page, "tx"), action: "cancel" }))).status, 303);
+      // A forged form with those buttons is counted like any other.
+      const statuses: number[] = [];
+      for (let i = 0; i < 3; i++) statuses.push((await fetch(`${limited.base}/login`, form({ tx: "A".repeat(80), setlang: "en" }))).status);
+      assert.deepEqual(statuses, [400, 400, 429]);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("shows which account the code is for, and lets the user go back to use another", async () => {
+    const { client } = await register();
+    const { verifier, challenge } = pkce();
+    const page = await (await openSignIn(client.client_id, challenge)).text();
+    const login = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email: "typo@example.com", password: FakePicnic.PASSWORD }));
+    const codePage = await login.text();
+    assert.match(codePage, /to the phone of <strong>typo@example.com<\/strong>/);
+
+    const sentBefore = picnic.smsSent;
+    const back = await fetch(`${base}/login/verify`, form({ pending: hidden(codePage, "pending"), lang: "en", action: "back" }));
+    assert.equal(back.status, 200);
+    const again = await back.text();
+    assert.match(again, /Sign in with Picnic/);
+    assert.match(again, /name="email" value=""/, "an empty form, for the other account");
+    assert.equal(picnic.smsSent, sentBefore);
+
+    // The form that comes back is a working one.
+    const login2 = await fetch(`${base}/login`, form({ tx: hidden(again, "tx"), lang: "en", country: "NL", email: "no2fa@example.com", password: FakePicnic.PASSWORD }));
+    assert.equal(login2.status, 303);
+    const code = new URL(login2.headers.get("location")!).searchParams.get("code")!;
+    const { res } = await token({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT });
+    assert.equal(res.status, 200);
+  });
+
+  it("ends on a page of its own for an app with its own scheme, which a redirect would leave on the form", async () => {
+    const redirect = "cursor://anysphere.cursor-mcp/oauth/callback";
+    const { client } = await register({ client_name: "Cursor", redirect_uris: [redirect] });
+    const { verifier, challenge } = pkce();
+    const page = await (await openSignIn(client.client_id, challenge, { redirect, lang: "en" })).text();
+    const done = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email: "no2fa@example.com", password: FakePicnic.PASSWORD }));
+    assert.equal(done.status, 200);
+    assert.equal(done.headers.get("location"), null);
+    assert.equal(done.headers.get("cache-control"), "no-store");
+    const html = await done.text();
+    assert.match(html, /<h1>You&#39;re signed in<\/h1>/);
+    assert.match(html, /Go back to <strong>Cursor<\/strong>\. You can close this tab\./);
+    const href = /<a class="btn" id="go" href="([^"]+)">Open Cursor<\/a>/.exec(html)?.[1]?.replace(/&amp;/g, "&");
+    assert.ok(href, "a button for when the app does not open by itself");
+    const target = new URL(href);
+    assert.equal(target.protocol + "//" + target.host + target.pathname, redirect);
+    assert.equal(target.searchParams.get("state"), "st4te");
+    const { res } = await token({ grant_type: "authorization_code", client_id: client.client_id, code: target.searchParams.get("code")!, code_verifier: verifier, redirect_uri: redirect });
+    assert.equal(res.status, 200, "the code on the page is the real one");
+
+    const cancelled = await (await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "en", action: "cancel" }))).text();
+    assert.match(cancelled, /<h1>Sign-in cancelled<\/h1>/);
+    assert.match(cancelled, /href="cursor:\/\/anysphere\.cursor-mcp\/oauth\/callback\?error=access_denied/);
+  });
+
+  it("has a button to show the password, which only appears where it works", async () => {
+    const { client } = await register();
+    const page = await (await openSignIn(client.client_id, pkce().challenge, { lang: "en" })).text();
+    assert.match(page, /<label for="password">Password<\/label>/);
+    assert.match(page, /<input type="password" id="password" name="password"/);
+    assert.match(page, /<button type="button" class="reveal" hidden aria-label="Show password"/, "hidden until the script shows it");
   });
 
   it("ignores a second click on the sign-in and code forms", async () => {
@@ -504,6 +696,9 @@ describe("settings", () => {
     assert.throws(() => loadConfig({ ...secret, UNKNOWN_APPS: "allow" }), /UNKNOWN_APPS/);
     assert.throws(() => loadConfig({ ...secret, EXTRA_KNOWN_APPS: "https://x.example/cb" }), /EXTRA_KNOWN_APPS/);
     assert.throws(() => loadConfig({ ...secret, SIGN_IN_LIMIT_PER_MINUTE: "0" }), /SIGN_IN_LIMIT_PER_MINUTE/);
+    assert.throws(() => loadConfig({ ...secret, PICNIC_LIMIT_PER_MINUTE: "0" }), /PICNIC_LIMIT_PER_MINUTE/);
+    assert.throws(() => loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "-1" }), /PICNIC_PAUSE_SECONDS/);
+    assert.equal(loadConfig({ ...secret, PICNIC_PAUSE_SECONDS: "0" }).picnicPauseSeconds, 0);
   });
 });
 
@@ -537,7 +732,7 @@ describe("tokens", () => {
     await (await mcp(refreshed.body.access_token)).close();
 
     const call = (bearer: string) =>
-      fetch(`${base}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: "{}" });
+      fetch(`${base}/picnic/mcp`, { method: "POST", headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: "{}" });
     const tampered = tokens.access_token.slice(0, -4) + (tokens.access_token.endsWith("AAAA") ? "BBBB" : "AAAA");
     assert.equal((await call(tampered)).status, 401);
     assert.equal((await call(tokens.refresh_token)).status, 401, "a refresh token is not an access token");
@@ -726,7 +921,104 @@ describe("mcp", () => {
 
   it("only speaks POST", async () => {
     const { access_token } = await connect();
-    const res = await fetch(`${base}/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
+    const res = await fetch(`${base}/picnic/mcp`, { headers: { Authorization: `Bearer ${access_token}`, Accept: "text/event-stream" } });
     assert.equal(res.status, 405);
+  });
+});
+
+describe("protecting the server's IP address at Picnic", () => {
+  const items = (...ids: string[]) => ({ items: ids.map((product_id) => ({ product_id })) });
+
+  it("caps the requests to Picnic for the whole server, and stops a cart change at the cap", async () => {
+    const other = await startServer({ PICNIC_LIMIT_PER_MINUTE: "4" });
+    try {
+      const sentBefore = picnic.requests;
+      const client = await mcp((await connect("no2fa@example.com", other.base)).access_token, other.base);
+      assert.equal(picnic.requests, sentBefore + 1, "signing in counts too");
+
+      const added = JSON.parse(textOf(await client.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100", "s200", "s100") })));
+      assert.equal(added.cart.item_count, 3, "what was added before the cap is reported");
+      assert.deepEqual(added.failed.map((f: { product_id: string }) => f.product_id), ["s200", "s100"]);
+      assert.match(added.failed[0].reason, /allows itself per minute/);
+      assert.match(added.failed[1].reason, /Not tried/);
+
+      const cart = await client.callTool({ name: "get_cart", arguments: {} });
+      assert.equal(cart.isError, true);
+      assert.match(textOf(cart), /allows itself per minute/);
+
+      const { client: app } = await register({}, other.base);
+      const page = await (await openSignIn(app.client_id, pkce().challenge, { at: other.base })).text();
+      const login = await fetch(`${other.base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email: "a@b.nl", password: "x" }));
+      assert.equal(login.status, 429);
+      assert.match(await login.text(), /Wait a minute and try again/);
+
+      assert.equal(picnic.requests, sentBefore + 4, "nothing went to Picnic beyond the cap");
+      await client.close();
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("stops every user's requests for a while once Picnic throttles one", async () => {
+    const other = await startServer({ PICNIC_PAUSE_SECONDS: "1" });
+    try {
+      const kim = await mcp((await connect("no2fa@example.com", other.base)).access_token, other.base);
+      const sam = await mcp((await connect("no2fa-sam@example.com", other.base)).access_token, other.base);
+      const sentBefore = picnic.requests;
+
+      picnic.throttle = true;
+      const refused = await kim.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100") });
+      picnic.throttle = false;
+      assert.equal(refused.isError, true);
+      assert.match(textOf(refused), /temporarily refusing requests/);
+      assert.equal(picnic.requests, sentBefore + 1, "the other products were not tried");
+
+      const paused = await sam.callTool({ name: "get_cart", arguments: {} });
+      assert.equal(paused.isError, true, "the pause is for the whole server");
+      assert.equal(picnic.requests, sentBefore + 1);
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      assert.equal(JSON.parse(textOf(await sam.callTool({ name: "get_cart", arguments: {} }))).item_count, 0);
+      await kim.close();
+      await sam.close();
+    } finally {
+      picnic.throttle = false;
+      await other.close();
+    }
+  });
+
+  it("guards the requests of the real Picnic client, except files from Picnic's CDN", async () => {
+    const realFetch = globalThis.fetch;
+    const sent: string[] = [];
+    let status = 403;
+    globalThis.fetch = (async (url: string) => {
+      sent.push(url);
+      return status === 200 ? Response.json({ items: [] }) : new Response("<html>blocked</html>", { status });
+    }) as typeof fetch;
+    try {
+      let time = 0;
+      const guard = new PicnicGuard({ limitPerMinute: 2, pauseMs: 30_000, now: () => time });
+      const client = createPicnicClient(guard)({ country: "NL", deviceId: "DEVICE", authKey: "key" });
+      const held = (reason: string) => (error: unknown) => error instanceof PicnicHeldError && error.reason === reason;
+
+      await assert.rejects(client.cart.getCart(), (error: unknown) => (error as { status?: number }).status === 403);
+      await assert.rejects(client.cart.getCart(), held("pause"));
+      assert.equal(sent.length, 1, "nothing is sent during the pause");
+
+      status = 200;
+      await client.sendRequest("GET", "https://cdn.example.com/chunk.js", null, { binary: true });
+      assert.equal(sent.length, 2, "the CDN is another host");
+
+      time = 30_000;
+      await client.cart.getCart();
+      await assert.rejects(client.cart.getCart(), held("limit"));
+      assert.equal(sent.length, 3, "two requests per minute, the refused one included");
+
+      time = 60_000;
+      await client.cart.getCart();
+      assert.equal(sent.length, 4);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

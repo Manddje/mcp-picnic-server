@@ -1,4 +1,4 @@
-import { createApp, VERSION } from "./app.js";
+import { createApp, MCP_PATH, VERSION } from "./app.js";
 import { loadConfig } from "./config.js";
 
 let config;
@@ -12,7 +12,7 @@ try {
 const app = createApp({ config });
 const server = app.listen(config.port, config.host, () => {
   console.log(`${config.serviceName} v${VERSION} listening on ${config.host}:${config.port}`);
-  console.log(`Public URL: ${config.publicUrl.origin}  ·  MCP endpoint: ${new URL("/mcp", config.publicUrl).href}`);
+  console.log(`Public URL: ${config.publicUrl.origin}  ·  MCP endpoint: ${new URL(MCP_PATH, config.publicUrl).href}`);
 });
 
 function shutdown(signal: string): void {

@@ -12,15 +12,20 @@ import { ICON_PATHS, mcpIcons, sendIcon } from "./icons.js";
 import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding, sendMessagePage } from "./pages.js";
-import { createPicnicClient, type PicnicFactory } from "./picnic.js";
+import { createPicnicClient, PicnicGuard, type PicnicFactory } from "./picnic.js";
 import { buildMcpServer, type ServerInfo } from "./tools.js";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
+
+/** Where the MCP endpoint is served. */
+export const MCP_PATH = "/picnic/mcp";
+/** Its address before it moved. Apps that connected back then still use it. */
+export const OLD_MCP_PATH = "/mcp";
 
 export type AppOptions = {
   config: Config;
-  /** Creates the Picnic client for a request; replaced by a fake in tests. */
-  picnic?: PicnicFactory;
+  /** Makes the factory of Picnic clients, whose requests all pass the guard; replaced by a fake in tests. */
+  picnic?: (guard: PicnicGuard) => PicnicFactory;
   /** Sign-in attempts allowed per IP address per 15 minutes. */
   signInAttemptLimit?: number;
   /** Sign-in attempts allowed per Picnic account per 15 minutes. */
@@ -39,7 +44,7 @@ function rpcError(res: Response, status: number, code: number, message: string):
 
 export function createApp({
   config,
-  picnic = createPicnicClient,
+  picnic: picnicBehind = createPicnicClient,
   signInAttemptLimit = 15,
   accountAttemptLimit = 10,
   log = console.log,
@@ -48,9 +53,14 @@ export function createApp({
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy);
 
+  // One guard for everything this server sends to Picnic: sign-ins, tool calls and sign-outs.
+  const picnic = picnicBehind(
+    new PicnicGuard({ limitPerMinute: config.picnicLimitPerMinute, pauseMs: config.picnicPauseSeconds * 1000, log }),
+  );
   const sealer = new Sealer(config.secretKey);
   const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
-  const mcpUrl = new URL("/mcp", config.publicUrl);
+  const mcpUrl = new URL(MCP_PATH, config.publicUrl);
+  const oldMcpUrl = new URL(OLD_MCP_PATH, config.publicUrl);
   const secure = config.publicUrl.protocol === "https:";
   const serverInfo: ServerInfo = { version: VERSION, websiteUrl: config.publicUrl.href, icons: mcpIcons(config.publicUrl) };
 
@@ -123,16 +133,20 @@ export function createApp({
     }),
   );
 
-  // Some clients look for the resource metadata at the root instead of under the /mcp path.
-  app.get("/.well-known/oauth-protected-resource", cors(), (_req, res) => {
+  // Each address has metadata that names that address: an app checks that the metadata it finds
+  // is about the address it connects to. The router above serves the one for the current address.
+  const resourceMetadata = (resource: URL) => (_req: Request, res: Response) => {
     res.json({
-      resource: mcpUrl.href,
+      resource: resource.href,
       authorization_servers: [config.publicUrl.href],
       scopes_supported: [SCOPE],
       resource_name: config.serviceName,
       bearer_methods_supported: ["header"],
     });
-  });
+  };
+  app.get(new URL(getOAuthProtectedResourceMetadataUrl(oldMcpUrl)).pathname, cors(), resourceMetadata(oldMcpUrl));
+  // Some clients look for the resource metadata at the root instead of under the path.
+  app.get("/.well-known/oauth-protected-resource", cors(), resourceMetadata(mcpUrl));
 
   app.use(
     createLoginRouter({
@@ -156,10 +170,6 @@ export function createApp({
     exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"],
     maxAge: 86400,
   });
-  const bearer = requireBearerAuth({
-    verifier: provider,
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl),
-  });
   // Per signed-in user, not per IP address (see above). Runs after authentication.
   const perUser = rateLimit({
     windowMs: 60 * 1000,
@@ -170,34 +180,41 @@ export function createApp({
     handler: (_req, res) => rpcError(res, 429, -32000, "Too many requests. Wait a minute before trying again."),
   });
 
-  app.options("/mcp", mcpCors);
-  app.post("/mcp", mcpCors, bearer, perUser, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
-    // No sessions: every request carries its token, so any request can be served on its own.
-    const session = sessionOf(req.auth);
-    const server = buildMcpServer(
-      { picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) },
-      serverInfo,
-    );
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
+  // The old address serves the same endpoint, so nobody who connected there has to connect again.
+  for (const url of [mcpUrl, oldMcpUrl]) {
+    const path = url.pathname;
+    // An app without a valid token is pointed to the metadata of the address it came to.
+    const bearer = requireBearerAuth({ verifier: provider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(url) });
+
+    app.options(path, mcpCors);
+    app.post(path, mcpCors, bearer, perUser, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
+      // No sessions: every request carries its token, so any request can be served on its own.
+      const session = sessionOf(req.auth);
+      const server = buildMcpServer(
+        { picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) },
+        serverInfo,
+      );
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      res.on("close", () => {
+        void transport.close();
+        void server.close();
+      });
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        log(`mcp request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+        if (!res.headersSent) rpcError(res, 500, -32603, "Internal server error");
+      }
     });
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (error) {
-      log(`mcp request failed: ${error instanceof Error ? error.message : "unknown error"}`);
-      if (!res.headersSent) rpcError(res, 500, -32603, "Internal server error");
-    }
-  });
-  // The server never pushes messages on its own, so there is no stream to open and no session to end.
-  app.all("/mcp", mcpCors, (req, res) => {
-    // Someone pasted the server URL into their browser: the home page says what to do with it.
-    if (req.method === "GET" && wantsHtml(req)) return res.redirect(302, "/");
-    res.setHeader("Allow", "POST, OPTIONS");
-    rpcError(res, 405, -32000, "Method not allowed. Send MCP requests with POST.");
-  });
+    // The server never pushes messages on its own, so there is no stream to open and no session to end.
+    app.all(path, mcpCors, (req, res) => {
+      // Someone pasted the server URL into their browser: the home page says what to do with it.
+      if (req.method === "GET" && wantsHtml(req)) return res.redirect(302, "/");
+      res.setHeader("Allow", "POST, OPTIONS");
+      rpcError(res, 405, -32000, "Method not allowed. Send MCP requests with POST.");
+    });
+  }
 
   app.use((req, res) => {
     if (wantsHtml(req)) {
