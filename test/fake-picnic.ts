@@ -41,6 +41,8 @@ export class FakePicnic {
   smsSent = 0;
   /** Picnic throttles the server: it answers every request with its edge's 403 page. */
   throttle = false;
+  /** Picnic takes the request and never answers. */
+  hang = false;
   /** Requests that reached Picnic. */
   requests = 0;
   /** Picnic can't be reached to sign out. */
@@ -212,6 +214,7 @@ export class FakePicnic {
         service[name] = (...args) =>
           guard.run(async () => {
             this.requests++;
+            if (this.hang) await new Promise(() => {});
             if (this.throttle) throw apiError(403);
             return method(...args);
           }, user);

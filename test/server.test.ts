@@ -9,8 +9,8 @@ import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
 import { LANGS, STRINGS } from "../src/i18n.js";
-import { isAllowedRedirectUri, RedirectPolicy, SIGN_IN_TTL } from "../src/oauth.js";
-import { createPicnicClient, PicnicGuard, PicnicHeldError } from "../src/picnic.js";
+import { ACCESS_TTL, ENDED_GRACE, isAllowedRedirectUri, RedirectPolicy, SIGN_IN_TTL } from "../src/oauth.js";
+import { createPicnicClient, PicnicGuard, PicnicHeldError, PicnicTimeoutError } from "../src/picnic.js";
 import { FakePicnic } from "./fake-picnic.js";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -31,11 +31,13 @@ async function freePort(): Promise<number> {
 before(async () => {
   port = await freePort();
   picnic = new FakePicnic();
-  // This server serves most tests, so the limits that protect Picnic are out of their way.
+  // This server serves most tests, so the limits that protect Picnic are out of their way, and it
+  // lets unknown apps in with a warning, to test the warning.
   const config = loadConfig({
     PORT: String(port),
     SECRET_KEY: "t".repeat(48),
     TRUST_PROXY: "false",
+    UNKNOWN_APPS: "warn",
     SIGN_IN_LIMIT_PER_MINUTE: "10000",
     PICNIC_LIMIT_PER_MINUTE: "100000",
     PICNIC_USER_LIMIT_PER_MINUTE: "100000",
@@ -52,7 +54,10 @@ before(async () => {
 after(() => new Promise((resolve) => server.close(resolve)));
 
 /** Starts a second server with other settings, for the tests of limits and policies. */
-async function startServer(env: Record<string, string>, options: { signInAttemptLimit?: number; accountAttemptLimit?: number } = {}) {
+async function startServer(
+  env: Record<string, string>,
+  options: { signInAttemptLimit?: number; accountAttemptLimit?: number; picnicTimeoutMs?: number } = {},
+) {
   const otherPort = await freePort();
   const config = loadConfig({ PORT: String(otherPort), SECRET_KEY: "t".repeat(48), TRUST_PROXY: "false", ...env });
   const other = createApp({ config, picnic: picnic.factory, log: () => {}, ...options }).listen(otherPort, "127.0.0.1");
@@ -331,12 +336,33 @@ describe("client registration", () => {
   });
 
   it("refuses dangerous redirect URIs", async () => {
-    for (const uri of ["javascript:alert(1)", "http://evil.example/cb", "data:text/html,x", "https://ok.example/cb#frag"]) {
+    for (const uri of [
+      "javascript:alert(1)",
+      "http://evil.example/cb",
+      "data:text/html,x",
+      "https://ok.example/cb#frag",
+      // Schemes the browser or the system acts on, and an app scheme nobody vouches for.
+      "tel:+31201234567",
+      "mailto:someone@example.com",
+      "smb://files.example/share",
+      "ms-msdt:/id",
+      "chrome://settings",
+      "itms-services://?action=download-manifest",
+      "someapp://oauth/callback",
+    ]) {
       assert.equal(isAllowedRedirectUri(uri), false, uri);
       assert.equal((await register({ redirect_uris: [uri] })).res.status, 400, uri);
     }
-    for (const uri of ["https://claude.ai/cb", "http://localhost:6274/callback", "http://127.0.0.1/cb", "cursor://anysphere.cursor-mcp/oauth/callback"]) {
+    for (const uri of [
+      "https://claude.ai/cb",
+      "http://localhost:6274/callback",
+      "http://127.0.0.1/cb",
+      "cursor://anysphere.cursor-mcp/oauth/callback",
+      // An app's own scheme, made from a domain name it owns.
+      "com.example.app:/oauth/callback",
+    ]) {
       assert.equal(isAllowedRedirectUri(uri), true, uri);
+      assert.equal((await register({ redirect_uris: [uri] })).res.status, 201, uri);
     }
   });
 
@@ -704,15 +730,24 @@ describe("sign-in", () => {
 });
 
 describe("settings", () => {
-  it("refuses unknown apps with UNKNOWN_APPS=block, including ones registered earlier", async () => {
+  it("refuses unknown apps unless told to warn instead, including ones registered earlier", async () => {
+    assert.equal(loadConfig({ SECRET_KEY: "t".repeat(48) }).unknownApps, "block");
+    assert.equal(loadConfig({ SECRET_KEY: "t".repeat(48), UNKNOWN_APPS: "warn" }).unknownApps, "warn");
     const evil = "https://evil.example/cb";
     const { client: earlier } = await register({ redirect_uris: [evil] });
     const strict = await startServer({
-      UNKNOWN_APPS: "block",
       EXTRA_KNOWN_APPS: "app.example.org, myapp://, https://Exact.example.org/oauth/Callback, https://many.example.org/cb/*",
     });
     try {
-      for (const uri of [evil, "https://claude.ai/any/other/page", "https://exact.example.org/oauth/callback", "https://exact.example.org/", "https://many.example.org/cb/a/b"]) {
+      for (const uri of [
+        evil,
+        "https://claude.ai/any/other/page",
+        "https://exact.example.org/oauth/callback",
+        "https://exact.example.org/",
+        "https://many.example.org/cb/a/b",
+        "com.example.app:/oauth/callback",
+        "otherapp://oauth/cb",
+      ]) {
         assert.equal((await register({ redirect_uris: [uri] }, strict.base)).res.status, 400, uri);
       }
       assert.equal((await openSignIn(earlier.client_id, pkce().challenge, { redirect: evil, at: strict.base })).status, 400);
@@ -794,10 +829,13 @@ describe("tokens", () => {
     const sealer = new Sealer("t".repeat(48));
     const now = Math.floor(Date.now() / 1000);
     const day = 24 * 60 * 60;
-    const expiryOf = (refreshToken: string) => sealer.open("refresh", refreshToken.slice(4))!.exp!;
+    // A refresh token can be read for a while after its sign-in ended, only to sign out at Picnic.
+    const expiryOf = (refreshToken: string) => sealer.open("refresh", refreshToken.slice(4))!.exp! - ENDED_GRACE;
     const refresh = (clientId: string, refreshToken: string) => token({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken });
 
     const tokens = await connect();
+    assert.equal(tokens.expires_in, ACCESS_TTL);
+    assert.ok(ACCESS_TTL <= 60 * 60, "an access token can't be taken back, so it is short-lived");
     const ends = expiryOf(tokens.refresh_token);
     assert.ok(Math.abs(ends - (now + SIGN_IN_TTL)) < 60, "a sign-in lasts SIGN_IN_TTL");
     await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -806,14 +844,17 @@ describe("tokens", () => {
     assert.equal(expiryOf(refreshed.body.refresh_token), ends, "refreshing does not move the end of the sign-in");
 
     // Tokens as this server would have issued them at other moments.
-    const record = { k: "key-1", cc: "NL", d: "DEVICE", c: tokens.clientId };
+    const record = { k: "key-crafted", cc: "NL", d: "DEVICE", c: tokens.clientId };
     const issued = (fields: Record<string, unknown>, ttl: number) => "pmr_" + sealer.seal("refresh", { ...record, ...fields }, ttl);
 
     const nearEnd = await refresh(tokens.clientId, issued({ t: now - SIGN_IN_TTL + 600 }, 600));
     assert.equal(nearEnd.res.status, 200);
     assert.ok(nearEnd.body.expires_in <= 600, "an access token does not outlive the sign-in");
 
-    assert.equal((await refresh(tokens.clientId, issued({ t: now - SIGN_IN_TTL - 60 }, 3600))).res.status, 400, "the sign-in has ended");
+    assert.equal((await refresh(tokens.clientId, issued({ t: now - SIGN_IN_TTL - 60, k: "key-ended" }, 3600))).res.status, 400, "the sign-in has ended");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(picnic.signedOut.has("key-ended"), "and its session is signed out at Picnic");
+    assert.ok(!picnic.signedOut.has("key-crafted"), "a sign-in that still runs is not");
 
     // Refresh tokens from before sign-ins had an end: valid for a year, without a sign-in time.
     const old = await refresh(tokens.clientId, issued({}, 365 * day));
@@ -1050,6 +1091,29 @@ describe("protecting the server's IP address at Picnic", () => {
     }
   });
 
+  it("gives up on a request Picnic doesn't answer, and stops a cart change there", async () => {
+    const other = await startServer({}, { picnicTimeoutMs: 100 });
+    try {
+      const client = await mcp((await connect("no2fa-patient@example.com", other.base)).access_token, other.base);
+      const sentBefore = picnic.requests;
+
+      picnic.hang = true;
+      const started = Date.now();
+      const added = await client.callTool({ name: "add_to_cart", arguments: items("s100", "s200", "s100") });
+      picnic.hang = false;
+      assert.equal(added.isError, true);
+      assert.match(textOf(added), /didn't answer in time.*may still have gone through/);
+      assert.ok(Date.now() - started < 2000, "the call does not wait for Picnic");
+      assert.equal(picnic.requests, sentBefore + 2, "the first product and the cart; the other products were not tried");
+
+      assert.equal(JSON.parse(textOf(await client.callTool({ name: "get_cart", arguments: {} }))).item_count, 0);
+      await client.close();
+    } finally {
+      picnic.hang = false;
+      await other.close();
+    }
+  });
+
   it("stops every user's requests for a while once Picnic throttles one", async () => {
     const other = await startServer({ PICNIC_PAUSE_SECONDS: "1" });
     try {
@@ -1108,6 +1172,23 @@ describe("protecting the server's IP address at Picnic", () => {
       time = 60_000;
       await client.cart.getCart();
       assert.equal(sent.length, 4);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("gives up on a request of the real Picnic client that gets no answer, also from Picnic's CDN", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch;
+    try {
+      const guard = new PicnicGuard({ limitPerMinute: 100, userLimitPerMinute: 100, pauseMs: 30_000, timeoutMs: 50 });
+      const client = createPicnicClient(guard)({ country: "NL", deviceId: "DEVICE", authKey: "key" });
+      await assert.rejects(client.cart.getCart(), PicnicTimeoutError);
+      await assert.rejects(client.sendRequest("GET", "https://cdn.example.com/chunk.js", null, { binary: true }), PicnicTimeoutError);
+
+      // Slow is not the same as throttled: the next request is sent.
+      globalThis.fetch = (async () => Response.json({ items: [] })) as unknown as typeof fetch;
+      await client.cart.getCart();
     } finally {
       globalThis.fetch = realFetch;
     }

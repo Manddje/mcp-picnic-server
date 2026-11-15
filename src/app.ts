@@ -29,6 +29,8 @@ export type AppOptions = {
   signInAttemptLimit?: number;
   /** Sign-in attempts allowed per Picnic account per 15 minutes. */
   accountAttemptLimit?: number;
+  /** How long one request to Picnic may take, in milliseconds. */
+  picnicTimeoutMs?: number;
   log?: (message: string) => void;
 };
 
@@ -46,6 +48,7 @@ export function createApp({
   picnic: picnicBehind = createPicnicClient,
   signInAttemptLimit = 15,
   accountAttemptLimit = 10,
+  picnicTimeoutMs,
   log = console.log,
 }: AppOptions): Express {
   const app = express();
@@ -58,6 +61,7 @@ export function createApp({
       limitPerMinute: config.picnicLimitPerMinute,
       userLimitPerMinute: config.picnicUserLimitPerMinute,
       pauseMs: config.picnicPauseSeconds * 1000,
+      timeoutMs: picnicTimeoutMs,
       log,
     }),
   );

@@ -18,7 +18,7 @@ export type Config = {
   trustProxy: number | boolean | string;
   /** Extra known apps: callback addresses (https://example.com/oauth/callback), app schemes (myapp://) and whole host names (example.com). */
   extraKnownApps: string[];
-  /** What to do with an app whose redirect URI is not a known one: warn on the sign-in page, or refuse it. */
+  /** What to do with an app whose redirect URI is not a known one: refuse it (the default), or warn on the sign-in page. */
   unknownApps: "warn" | "block";
   /** Sign-ins that reach Picnic per minute, for the whole server, so Picnic doesn't throttle its IP address. */
   signInLimitPerMinute: number;
@@ -99,7 +99,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
-  const unknownApps = env.UNKNOWN_APPS?.trim() || "warn";
+  const unknownApps = env.UNKNOWN_APPS?.trim() || "block";
   if (unknownApps !== "warn" && unknownApps !== "block") {
     throw new Error(`UNKNOWN_APPS must be "warn" or "block" (got "${unknownApps}")`);
   }

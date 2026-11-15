@@ -40,6 +40,14 @@ export class PicnicHeldError extends Error {
   }
 }
 
+/** Picnic didn't answer a request in time. The request may still have arrived and been carried out. */
+export class PicnicTimeoutError extends Error {
+  constructor(seconds: number) {
+    super(`Picnic did not answer within ${seconds}s`);
+    this.name = "PicnicTimeoutError";
+  }
+}
+
 /**
  * Stands between the whole server and Picnic. Every user reaches Picnic from this server's IP
  * address, so once Picnic throttles that address everyone is locked out. The guard keeps the server
@@ -62,6 +70,8 @@ export class PicnicGuard {
       userLimitPerMinute: number;
       /** How long no request goes to Picnic after it throttled one; 0 for no pause. */
       pauseMs: number;
+      /** How long a request may take. The library sets no limit itself, so a silent Picnic would hold a request for minutes. */
+      timeoutMs?: number;
       log?: (message: string) => void;
       now?: () => number;
     },
@@ -91,7 +101,7 @@ export class PicnicGuard {
     this.sent++;
     if (user !== undefined) this.sentByUser.set(user, sentByUser + 1);
     try {
-      return await send();
+      return await this.timed(send);
     } catch (error) {
       const { kind, status } = classifyPicnicError(error);
       if (kind === "throttled" && pauseMs > 0) {
@@ -99,6 +109,23 @@ export class PicnicGuard {
         this.pausedUntil = now() + pauseMs;
       }
       throw error;
+    }
+  }
+
+  /** Waits for a request no longer than the time limit, then gives up with a {@link PicnicTimeoutError}. */
+  async timed<T>(send: () => Promise<T>): Promise<T> {
+    const { timeoutMs = 20_000 } = this.options;
+    const answer = send();
+    let timer: NodeJS.Timeout | undefined;
+    const givenUp = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new PicnicTimeoutError(timeoutMs / 1000)), timeoutMs);
+    });
+    try {
+      return await Promise.race([answer, givenUp]);
+    } finally {
+      clearTimeout(timer);
+      // The request itself can't be called back; whatever it still ends with is nobody's to handle.
+      answer.catch(() => {});
     }
   }
 }
@@ -122,7 +149,7 @@ class GuardedPicnicClient extends PicnicClient {
     const send = () => super.sendRequestWithHeaders<TRequestData, TResponseData>(method, path, data, options);
     // Page scripts come from Picnic's CDN, which is another host with its own limits.
     const elsewhere = /^https?:\/\//.test(path) && new URL(path).origin !== new URL(this.url).origin;
-    return elsewhere ? send() : this.guard.run(send, this.countedAs);
+    return elsewhere ? this.guard.timed(send) : this.guard.run(send, this.countedAs);
   }
 }
 
@@ -138,9 +165,9 @@ export function newDeviceId(): string {
 
 /**
  * "throttled": Picnic refuses requests. "busy": this server has used up its own requests for this
- * minute. "over_share": this user has used up their share of them.
+ * minute. "over_share": this user has used up their share of them. "timeout": Picnic didn't answer in time.
  */
-export type PicnicErrorKind = "credentials" | "code" | "session" | "throttled" | "busy" | "over_share" | "not_found" | "other";
+export type PicnicErrorKind = "credentials" | "code" | "session" | "throttled" | "busy" | "over_share" | "timeout" | "not_found" | "other";
 
 /** Sorts an error from picnic-api into the few cases the server treats differently. */
 export function classifyPicnicError(error: unknown): { kind: PicnicErrorKind; status: number | null; code: string | null } {
@@ -148,6 +175,7 @@ export function classifyPicnicError(error: unknown): { kind: PicnicErrorKind; st
     const kind = ({ pause: "throttled", limit: "busy", user: "over_share" } as const)[error.reason];
     return { kind, status: null, code: null };
   }
+  if (error instanceof PicnicTimeoutError) return { kind: "timeout", status: null, code: null };
   if (PicnicClient.isProductNotFoundError(error)) return { kind: "not_found", status: 404, code: null };
   if (!PicnicClient.isPicnicApiError(error)) return { kind: "other", status: null, code: null };
   const { status, code } = error;

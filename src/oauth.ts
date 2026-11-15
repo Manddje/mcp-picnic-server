@@ -9,12 +9,21 @@ import type { Sealer } from "./crypto.js";
 import { classifyPicnicError, isCountry, type PicnicFactory, type PicnicSession } from "./picnic.js";
 
 export const SCOPE = "picnic";
-const ACCESS_TTL = 24 * 60 * 60;
+/**
+ * Short, because an access token can't be taken back by itself: it works until it expires or the
+ * session is signed out at Picnic. The app gets a new one with its refresh token.
+ */
+export const ACCESS_TTL = 60 * 60;
 /**
  * How long one sign-in lasts. Refreshing doesn't extend it, so a refresh token that leaks stops
  * working by itself, and the user signs in again after this time.
  */
 export const SIGN_IN_TTL = 90 * 24 * 60 * 60;
+/**
+ * How long a refresh token can still be read after its sign-in ended. It gets no tokens then; it
+ * only lets the server sign the session out at Picnic when the app comes back with it.
+ */
+export const ENDED_GRACE = 30 * 24 * 60 * 60;
 /** Refresh tokens from before sign-ins had an end lasted this long, counted from each refresh. */
 const LEGACY_REFRESH_TTL = 365 * 24 * 60 * 60;
 const CODE_TTL_MS = 2 * 60 * 1000;
@@ -41,10 +50,15 @@ type Grant = {
 };
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
-const FORBIDDEN_SCHEMES = new Set(["javascript:", "data:", "vbscript:", "file:", "blob:", "about:", "ftp:", "ws:", "wss:"]);
+/** A scheme an app made for itself from a domain name it owns (com.example.app:), as RFC 8252 asks of apps. */
+const PRIVATE_USE_SCHEME = /^[a-z][a-z0-9+-]*(\.[a-z0-9+-]+)+:$/;
 
-/** https anywhere, http on this computer only, or an app's own scheme (cursor://, vscode://). */
-export function isAllowedRedirectUri(uri: string): boolean {
+/**
+ * https anywhere, http on this computer only, or an app's own scheme: a known one (cursor://,
+ * vscode://) or one made from a domain name. Any other scheme is refused, because the browser or
+ * the system may act on it (tel:, smb://, ms-msdt:) with whatever the client put in the address.
+ */
+export function isAllowedRedirectUri(uri: string, knownSchemes: ReadonlySet<string> = new Set(KNOWN_APP_SCHEMES)): boolean {
   let url: URL;
   try {
     url = new URL(uri);
@@ -54,7 +68,7 @@ export function isAllowedRedirectUri(uri: string): boolean {
   if (url.hash || url.username || url.password) return false;
   if (url.protocol === "https:") return true;
   if (url.protocol === "http:") return LOOPBACK.has(url.hostname);
-  return !FORBIDDEN_SCHEMES.has(url.protocol);
+  return knownSchemes.has(url.protocol) || PRIVATE_USE_SCHEME.test(url.protocol);
 }
 
 /**
@@ -150,7 +164,7 @@ export class RedirectPolicy {
 
   /** Whether a client may use this redirect URI at all. */
   allows(uri: string): boolean {
-    return isAllowedRedirectUri(uri) && (!this.blockUnknown || this.trust(uri) !== "unknown");
+    return isAllowedRedirectUri(uri, this.schemes) && (!this.blockUnknown || this.trust(uri) !== "unknown");
   }
 }
 
@@ -271,6 +285,11 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
     }
     // A token from before sign-ins had an end: count from when that token was issued.
     const signedInAt = record.signedInAt ?? record.exp - LEGACY_REFRESH_TTL;
+    if (signedInAt + SIGN_IN_TTL <= Math.floor(Date.now() / 1000)) {
+      // The app came back after the end: the Picnic key in its tokens is of no use anymore, so end it there too.
+      void this.signOut(record.session);
+      throw new InvalidGrantError("This sign-in has ended. Sign in again.");
+    }
     return this.issueTokens(client.client_id, record.session, signedInAt);
   }
 
@@ -324,7 +343,7 @@ export class PicnicOAuthProvider implements OAuthServerProvider {
       access_token: ACCESS_PREFIX + this.sealer.seal("access", record, accessTtl),
       token_type: "bearer",
       expires_in: accessTtl,
-      refresh_token: REFRESH_PREFIX + this.sealer.seal("refresh", record, left),
+      refresh_token: REFRESH_PREFIX + this.sealer.seal("refresh", record, left + ENDED_GRACE),
       scope: SCOPE,
     };
   }

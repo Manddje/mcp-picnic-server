@@ -117,6 +117,8 @@ function sendHtml(res: Response, status: number, lang: Lang, title: string, body
   res.status(status);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
+  // No form-action: Chrome applies it to every redirect that follows a form, so it would also have to
+  // name wherever the app sends the user on to after its callback, which this server can't know.
   res.setHeader(
     "Content-Security-Policy",
     `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data: 'self'; base-uri 'none'; frame-ancestors 'none'`,
