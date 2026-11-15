@@ -9,6 +9,9 @@ const en = {
   tagline: "Grocery shopping with your AI assistant",
   intro:
     "Connect Claude, ChatGPT or any other MCP app to your Picnic account. Search products, fill your cart, plan recipes and pick a delivery slot, just by asking.",
+  // Shown under the title in search results, which cut it off after about 160 characters.
+  metaDescription:
+    "Connect Claude, ChatGPT or any other MCP app to your Picnic account. Search products, fill your cart, plan recipes and pick a delivery slot, just by asking.",
   urlLabel: "Server URL",
   copy: "Copy",
   copied: "Copied",
@@ -99,6 +102,8 @@ const nl: Strings = {
   tagline: "Boodschappen doen met je AI-assistent",
   intro:
     "Koppel Claude, ChatGPT of een andere MCP-app aan je Picnic-account. Zoek producten, vul je mandje, plan recepten en kies een bezorgmoment, gewoon door het te vragen.",
+  metaDescription:
+    "Koppel Claude, ChatGPT of een andere MCP-app aan je Picnic-account. Zoek producten, vul je mandje en kies een bezorgmoment, gewoon door het te vragen.",
   urlLabel: "Server-URL",
   copy: "Kopieer",
   copied: "Gekopieerd",
@@ -185,6 +190,8 @@ const de: Strings = {
   tagline: "Einkaufen mit deinem KI-Assistenten",
   intro:
     "Verbinde Claude, ChatGPT oder eine andere MCP-App mit deinem Picnic-Konto. Produkte suchen, Warenkorb füllen, Rezepte planen und ein Lieferfenster wählen, einfach per Frage.",
+  metaDescription:
+    "Verbinde Claude, ChatGPT oder eine andere MCP-App mit deinem Picnic-Konto. Produkte suchen, Warenkorb füllen und Lieferfenster wählen, einfach per Frage.",
   urlLabel: "Server-URL",
   copy: "Kopieren",
   copied: "Kopiert",
@@ -271,6 +278,8 @@ const fr: Strings = {
   tagline: "Faites vos courses avec votre assistant IA",
   intro:
     "Connectez Claude, ChatGPT ou toute autre application MCP à votre compte Picnic. Cherchez des produits, remplissez votre panier, planifiez des recettes et choisissez un créneau de livraison, simplement en le demandant.",
+  metaDescription:
+    "Connectez Claude, ChatGPT ou une autre application MCP à votre compte Picnic. Cherchez des produits, remplissez votre panier et choisissez un créneau.",
   urlLabel: "URL du serveur",
   copy: "Copier",
   copied: "Copié",

@@ -7,12 +7,13 @@ import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelconte
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
 import { Sealer } from "./crypto.js";
-import { pickLang } from "./i18n.js";
+import { isLang, pickLang } from "./i18n.js";
+import { ICON_PATHS, mcpIcons, sendIcon } from "./icons.js";
 import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding } from "./pages.js";
 import { createPicnicClient, type PicnicFactory } from "./picnic.js";
-import { buildMcpServer } from "./tools.js";
+import { buildMcpServer, type ServerInfo } from "./tools.js";
 
 export const VERSION = "1.0.0";
 
@@ -46,6 +47,7 @@ export function createApp({
   const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
   const mcpUrl = new URL("/mcp", config.publicUrl);
   const secure = config.publicUrl.protocol === "https:";
+  const serverInfo: ServerInfo = { version: VERSION, websiteUrl: config.publicUrl.href, icons: mcpIcons(config.publicUrl) };
 
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -68,6 +70,9 @@ export function createApp({
   app.get("/", (req, res) => {
     sendLanding(res, pickLang(req), {
       serviceName: config.serviceName,
+      homeUrl: config.publicUrl.href,
+      // `/` follows the browser's language; `/?lang=xx` is that language's own address.
+      pinned: isLang(req.query.lang),
       mcpUrl: mcpUrl.href,
       contact: config.contact,
       sourceUrl: config.sourceUrl,
@@ -75,8 +80,12 @@ export function createApp({
   });
 
   app.get("/robots.txt", (_req, res) => {
-    res.type("text/plain").send("User-agent: *\nAllow: /$\nDisallow: /\n");
+    // Only the landing page is for search engines: `/` and its translations at `/?lang=xx`, with its icon.
+    const icons = ICON_PATHS.map((path) => `Allow: ${path}$\n`).join("");
+    res.type("text/plain").send(`User-agent: *\nAllow: /$\nAllow: /?lang=\n${icons}Disallow: /\n`);
   });
+
+  app.get(ICON_PATHS, sendIcon);
 
   // Registration and token requests are made by the AI app's servers, so thousands of users can share
   // a handful of IP addresses there. A limit per IP address that suits one user would lock all of
@@ -153,7 +162,7 @@ export function createApp({
     const session = sessionOf(req.auth);
     const server = buildMcpServer(
       { picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) },
-      VERSION,
+      serverInfo,
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {

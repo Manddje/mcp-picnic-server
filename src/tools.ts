@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import type { Implementation, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import PicnicClient from "picnic-api";
 import { z } from "zod";
 import * as fmt from "./format.js";
@@ -55,8 +55,11 @@ const READ: ToolAnnotations = { readOnlyHint: true, openWorldHint: true };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
 const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 
-export function buildMcpServer(ctx: ToolContext, version: string): McpServer {
-  const server = new McpServer({ name: "picnic", title: "Picnic", version }, { instructions: SERVER_INSTRUCTIONS });
+/** What the server tells a client about itself, besides its name. */
+export type ServerInfo = Pick<Implementation, "version" | "websiteUrl" | "icons">;
+
+export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
+  const server = new McpServer({ name: "picnic", title: "Picnic", ...info }, { instructions: SERVER_INSTRUCTIONS });
   const { picnic } = ctx;
 
   /** Registers a tool whose result is returned as compact JSON and whose errors become readable text. */

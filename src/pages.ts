@@ -1,14 +1,14 @@
 import { randomBytes } from "node:crypto";
 import type { Response } from "express";
 import { LANG_NAMES, LANGS, STRINGS, type Lang, type Strings } from "./i18n.js";
+import { ICON_LINKS, ICON_SVG } from "./icons.js";
 import { COUNTRIES, type Country } from "./picnic.js";
 
 export function esc(value: unknown): string {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#1f7a4d"/><path d="M11 14l4-6m6 6l-4-6M7 14h18l-2 9.5a2 2 0 0 1-2 1.5H11a2 2 0 0 1-2-1.5L7 14zm6 3.5v4m3-4v4m3-4v4" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-const ICON_URI = `data:image/svg+xml,${encodeURIComponent(ICON)}`;
+const ICON_URI = `data:image/svg+xml,${encodeURIComponent(ICON_SVG)}`;
 
 const CSS = `
 :root{--bg:#f6f5f1;--card:#fff;--ink:#1c1b18;--muted:#66655f;--line:#e2e0d8;--accent:#1f7a4d;--accent-ink:#fff;--soft:#eef5f0;--err:#b3261e;--err-bg:#fdeceb;--code:#f1efe9}
@@ -69,24 +69,33 @@ input.otp{font:600 22px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace
 .center{text-align:center}
 `;
 
-function sendHtml(res: Response, status: number, lang: Lang, title: string, body: string, script = ""): void {
+type HtmlOptions = {
+  script?: string;
+  /** Extra tags for the head, already escaped. */
+  head?: string;
+  /** Whether search engines may list the page. Only the landing page asks for this. */
+  indexable?: boolean;
+};
+
+function sendHtml(res: Response, status: number, lang: Lang, title: string, body: string, { script = "", head = "", indexable = false }: HtmlOptions = {}): void {
   const nonce = randomBytes(16).toString("base64");
   res.status(status);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader(
     "Content-Security-Policy",
-    `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data:; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data: 'self'; base-uri 'none'; frame-ancestors 'none'`,
   );
   res.send(`<!doctype html>
 <html lang="${lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="${status === 200 && script ? "index,follow" : "noindex"}">
+<meta name="robots" content="${indexable ? "index,follow" : "noindex"}">
 <meta name="color-scheme" content="light dark">
 <title>${esc(title)}</title>
-<link rel="icon" href="${ICON_URI}">
+${head}
+${ICON_LINKS}
 <style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
@@ -102,13 +111,60 @@ function brand(serviceName: string): string {
 
 function langLinks(current: Lang, hrefFor: (lang: Lang) => string): string {
   return `<nav class="langs" aria-label="Language">${LANGS.map(
-    (l) => `<a href="${esc(hrefFor(l))}" lang="${l}" title="${LANG_NAMES[l]}"${l === current ? ' aria-current="true"' : ""}>${l.toUpperCase()}</a>`,
+    (l) => `<a href="${esc(hrefFor(l))}" lang="${l}" hreflang="${l}" title="${LANG_NAMES[l]}"${l === current ? ' aria-current="true"' : ""}>${l.toUpperCase()}</a>`,
   ).join("")}</nav>`;
 }
 
 /* ---------- Landing page ---------- */
 
-export type LandingOptions = { serviceName: string; mcpUrl: string; contact: string | null; sourceUrl: string | null };
+export type LandingOptions = {
+  serviceName: string;
+  /** The public address of this page, ending in a slash. */
+  homeUrl: string;
+  /** Whether the address names the language (`/?lang=nl`), rather than leaving it to the browser (`/`). */
+  pinned: boolean;
+  mcpUrl: string;
+  contact: string | null;
+  sourceUrl: string | null;
+};
+
+const OG_LOCALE: Record<Lang, string> = { en: "en_US", nl: "nl_NL", de: "de_DE", fr: "fr_FR" };
+
+/** What search engines and link previews read: one address per language, and `/` for everyone else. */
+function landingHead(lang: Lang, title: string, o: LandingOptions): string {
+  const t = STRINGS[lang];
+  const urlFor = (l: Lang) => `${o.homeUrl}?lang=${l}`;
+  const canonical = o.pinned ? urlFor(lang) : o.homeUrl;
+  const jsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    name: o.serviceName,
+    description: t.metaDescription,
+    url: canonical,
+    inLanguage: lang,
+    applicationCategory: "ShoppingApplication",
+    operatingSystem: "Any",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "EUR" },
+  }).replace(/</g, "\\u003c");
+
+  return [
+    `<meta name="description" content="${esc(t.metaDescription)}">`,
+    `<link rel="canonical" href="${esc(canonical)}">`,
+    ...LANGS.map((l) => `<link rel="alternate" hreflang="${l}" href="${esc(urlFor(l))}">`),
+    `<link rel="alternate" hreflang="x-default" href="${esc(o.homeUrl)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="${esc(o.serviceName)}">`,
+    `<meta property="og:title" content="${esc(title)}">`,
+    `<meta property="og:description" content="${esc(t.metaDescription)}">`,
+    `<meta property="og:url" content="${esc(canonical)}">`,
+    `<meta property="og:image" content="${esc(o.homeUrl)}icon-512.png">`,
+    `<meta property="og:locale" content="${OG_LOCALE[lang]}">`,
+    ...LANGS.filter((l) => l !== lang).map((l) => `<meta property="og:locale:alternate" content="${OG_LOCALE[l]}">`),
+    `<meta name="twitter:card" content="summary">`,
+    // A data block, not a script that runs, so the content security policy leaves it alone.
+    `<script type="application/ld+json">${jsonLd}</script>`,
+  ].join("\n");
+}
 
 export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void {
   const t = STRINGS[lang];
@@ -170,7 +226,9 @@ export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void 
 </div>`;
 
   const script = `document.addEventListener("click",function(e){var b=e.target.closest("[data-copy]");if(!b)return;var s=document.getElementById(b.dataset.copy);navigator.clipboard.writeText(s.textContent).then(function(){var o=b.textContent;b.textContent=b.dataset.done;setTimeout(function(){b.textContent=o},1600)})});`;
-  sendHtml(res, 200, lang, `${o.serviceName} · ${t.tagline}`, body, script);
+  const title = `${o.serviceName} · ${t.tagline}`;
+  if (!o.pinned) res.vary("Accept-Language");
+  sendHtml(res, 200, lang, title, body, { script, head: landingHead(lang, title, o), indexable: true });
 }
 
 /* ---------- Sign-in pages ---------- */

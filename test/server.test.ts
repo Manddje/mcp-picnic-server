@@ -8,6 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Sealer } from "../src/crypto.js";
+import { LANGS, STRINGS } from "../src/i18n.js";
 import { isAllowedRedirectUri, SIGN_IN_TTL } from "../src/oauth.js";
 import { FakePicnic } from "./fake-picnic.js";
 
@@ -151,6 +152,79 @@ describe("discovery", () => {
     assert.match(html, /<html lang="de">/);
     assert.ok(html.includes(`${base}/mcp`));
     assert.match(res.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  });
+
+  it("serves its own icon, so apps do not show the icon of the parent domain", async () => {
+    const types = {
+      "/favicon.ico": "image/x-icon",
+      "/icon.svg": "image/svg+xml",
+      "/icon-192.png": "image/png",
+      "/icon-512.png": "image/png",
+      "/apple-touch-icon.png": "image/png",
+    };
+    const robots = await (await fetch(`${base}/robots.txt`)).text();
+    for (const [path, type] of Object.entries(types)) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 200, path);
+      assert.equal(res.headers.get("content-type"), type, path);
+      assert.match(res.headers.get("cache-control") ?? "", /public/, path);
+      assert.ok((await res.arrayBuffer()).byteLength > 200, `${path} has content`);
+      assert.ok(robots.includes(`Allow: ${path}$`), `${path} may be crawled`);
+    }
+    const png = new Uint8Array(await (await fetch(`${base}/icon-192.png`)).arrayBuffer());
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+
+    const res = await fetch(`${base}/`);
+    const html = await res.text();
+    assert.ok(html.includes(`<link rel="icon" href="/favicon.ico"`));
+    assert.ok(html.includes(`<link rel="apple-touch-icon" href="/apple-touch-icon.png">`));
+    assert.match(res.headers.get("content-security-policy") ?? "", /img-src data: 'self'/, "the browser may load the icon");
+  });
+
+  it("gives each language of the landing page its own address for search engines", async () => {
+    const res = await fetch(`${base}/?lang=nl`, { headers: { "Accept-Language": "de" } });
+    const html = await res.text();
+    assert.match(html, /<html lang="nl">/);
+    assert.match(html, /<meta name="robots" content="index,follow">/);
+    assert.ok(html.includes(`<meta name="description" content="${STRINGS.nl.metaDescription}">`));
+    assert.ok(html.includes(`<link rel="canonical" href="${base}/?lang=nl">`));
+    for (const lang of LANGS) {
+      assert.ok(html.includes(`<link rel="alternate" hreflang="${lang}" href="${base}/?lang=${lang}">`), `points to the ${lang} page`);
+    }
+    assert.ok(html.includes(`<link rel="alternate" hreflang="x-default" href="${base}/">`));
+    assert.ok(html.includes(`<meta property="og:url" content="${base}/?lang=nl">`));
+    assert.ok(html.includes(`<meta property="og:locale" content="nl_NL">`));
+    const data = JSON.parse(/<script type="application\/ld\+json">(.*?)<\/script>/.exec(html)?.[1] ?? "null") as Record<string, unknown>;
+    assert.equal(data["@type"], "WebApplication");
+    assert.equal(data.url, `${base}/?lang=nl`);
+    assert.equal(data.inLanguage, "nl");
+  });
+
+  it("keeps the bare address as the one that follows the browser's language", async () => {
+    const res = await fetch(`${base}/?lang=xx&ref=y`, { headers: { "Accept-Language": "fr" } });
+    const html = await res.text();
+    assert.match(html, /<html lang="fr">/);
+    assert.ok(html.includes(`<link rel="canonical" href="${base}/">`));
+    assert.match(res.headers.get("vary") ?? "", /accept-language/i);
+  });
+
+  it("lets search engines read the landing page in every language, and no other page", async () => {
+    const robots = (await (await fetch(`${base}/robots.txt`)).text()).trim().split("\n");
+    assert.equal(robots[0], "User-agent: *");
+    assert.ok(robots.includes("Allow: /$"));
+    assert.ok(robots.includes("Allow: /?lang="));
+    assert.equal(robots.at(-1), "Disallow: /");
+    const { client } = await register();
+    const signInPage = await (await openSignIn(client.client_id, pkce().challenge)).text();
+    assert.match(signInPage, /<meta name="robots" content="noindex">/);
+    assert.doesNotMatch(signInPage, /rel="canonical"|hreflang="x-default"|application\/ld\+json/);
+  });
+
+  it("keeps the description for search results within the length they show", () => {
+    for (const lang of LANGS) {
+      const length = STRINGS[lang].metaDescription.length;
+      assert.ok(length >= 120 && length <= 160, `${lang} is ${length} characters`);
+    }
   });
 
   it("answers the health check", async () => {
@@ -486,6 +560,9 @@ describe("mcp", () => {
     assert.equal(tools.find((t) => t.name === "get_cart")?.annotations?.readOnlyHint, true);
     assert.equal(tools.find((t) => t.name === "clear_cart")?.annotations?.destructiveHint, true);
     assert.match(client.getInstructions() ?? "", /cannot place or pay/);
+    const info = client.getServerVersion();
+    assert.equal(info?.websiteUrl, `${base}/`);
+    assert.deepEqual(info?.icons?.[0], { src: `${base}/icon-192.png`, mimeType: "image/png", sizes: ["192x192"] });
     await client.close();
   });
 
