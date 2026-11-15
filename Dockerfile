@@ -6,6 +6,10 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
+COPY assets ./assets
+COPY test ./test
+# A failing test fails the build, so the deploy stops and the running version stays up.
+RUN npm test
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine

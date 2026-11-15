@@ -37,6 +37,8 @@ There is deliberately no tool to check out, pay or cancel an order. The assistan
 3. Add one environment variable: `SECRET_KEY`, the output of `openssl rand -hex 32`.
 4. Deploy. The health check is built into the image (`/health`).
 
+The image build runs the tests. When one fails the build fails, so Coolify keeps the version that is running.
+
 The public address is taken from the domain Coolify assigns (`COOLIFY_URL`). Set `PUBLIC_URL` yourself when you run it elsewhere.
 
 | Variable | Required | Meaning |
