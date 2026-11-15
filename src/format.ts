@@ -101,8 +101,46 @@ function cartLine(i: CartLineItem) {
   };
 }
 
-function window(start: string | null, end: string | null): string | undefined {
-  return start && end ? `${start} – ${end}` : (start ?? undefined);
+/* ---------- Times ---------- */
+
+// Picnic delivers in the Netherlands, Germany and France, which share one clock.
+const CLOCK = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Amsterdam",
+  weekday: "long",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/** A moment (ISO text or epoch milliseconds) on the user's clock: its date, weekday and time. */
+function local(value: string | number | null | undefined): { date: string; weekday: string; time: string } | null {
+  if (value === null || value === undefined || value === "") return null;
+  const instant = new Date(value);
+  if (Number.isNaN(instant.getTime())) return null;
+  const part = Object.fromEntries(CLOCK.formatToParts(instant).map((p) => [p.type, p.value]));
+  return { date: `${part.year}-${part.month}-${part.day}`, weekday: part.weekday!, time: `${part.hour}:${part.minute}` };
+}
+
+/**
+ * A moment as the user would say it: "Monday 2026-11-16 14:30". The weekday is spelled out because
+ * a model that has to work it out from the date gets it wrong now and then.
+ */
+export function moment(value: string | number | null | undefined): string | undefined {
+  const at = local(value);
+  if (!at) return typeof value === "string" && value ? value : undefined;
+  return `${at.weekday} ${at.date} ${at.time}`;
+}
+
+/** A delivery window: "Monday 2026-11-16 14:30–15:30". */
+export function window(start: string | null, end: string | null): string | undefined {
+  const from = local(start);
+  const to = local(end);
+  if (!from) return start && end ? `${start} – ${end}` : (start ?? undefined);
+  if (!to) return moment(start);
+  return to.date === from.date ? `${moment(start)}–${to.time}` : `${moment(start)} – ${moment(end)}`;
 }
 
 export function cart(c: Cart) {
@@ -125,24 +163,42 @@ export function cart(c: Cart) {
   };
 }
 
-export function deliverySlot(s: DeliverySlot) {
+function deliverySlot(s: DeliverySlot) {
+  const from = local(s.windowStart);
+  const to = local(s.windowEnd);
   return {
     slot_id: s.slotId,
-    start: s.windowStart,
-    end: s.windowEnd,
-    order_before: s.cutOffTime,
-    available: s.isAvailable,
+    window: from && to ? `${from.time}–${to.time}` : `${s.windowStart} – ${s.windowEnd}`,
+    order_before: moment(s.cutOffTime),
     selected: s.isSelected || undefined,
     green_choice: s.isGreenChoice || undefined,
+    unavailable: !s.isAvailable || undefined,
     minimum_order_value: eur(s.minimumOrderValue),
   };
+}
+
+/**
+ * Delivery slots per day. Picnic offers some two hundred slots over two weeks; listed one by one
+ * with full timestamps they fill the model's context, so a day is named once and its slots only
+ * carry what differs.
+ */
+export function deliveryDays(slots: DeliverySlot[]) {
+  const days = new Map<string, { date: string; weekday: string | undefined; slots: ReturnType<typeof deliverySlot>[] }>();
+  for (const slot of slots) {
+    const at = local(slot.windowStart);
+    const date = at?.date ?? slot.windowStart;
+    const day = days.get(date) ?? { date, weekday: at?.weekday, slots: [] };
+    day.slots.push(deliverySlot(slot));
+    days.set(date, day);
+  }
+  return [...days.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export function deliverySummary(d: DeliverySummary) {
   return {
     delivery_id: d.id,
     status: d.status,
-    ordered_at: d.creationTime,
+    ordered_at: moment(d.creationTime),
     window: window(d.windowStart, d.windowEnd),
     items: d.itemCount,
     total: eur(d.totalPrice),
@@ -153,7 +209,7 @@ export function delivery(d: Delivery) {
   return {
     delivery_id: d.id,
     status: d.status,
-    ordered_at: d.creationTime,
+    ordered_at: moment(d.creationTime),
     window: window(d.windowStart, d.windowEnd),
     total: eur(d.totalPrice),
     savings: eur(d.discount || null),

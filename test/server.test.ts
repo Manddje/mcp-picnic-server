@@ -227,6 +227,34 @@ describe("discovery", () => {
     }
   });
 
+  it("gives every snippet on the landing page its own copy button", async () => {
+    const html = await (await fetch(`${base}/?lang=en`)).text();
+    const targets = [...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]!);
+    assert.deepEqual(targets, ["mcp-url", "snip-claude-code", "snip-cursor", "snip-vscode", "snip-other"]);
+    for (const id of targets) assert.ok(html.includes(`id="${id}"`), `${id} is on the page`);
+    assert.match(html, /<pre id="snip-claude-code">claude mcp add --transport http picnic http:\/\/localhost:\d+\/mcp<\/pre>/);
+    assert.match(html, /role="status" id="copy-status"/, "copying is announced to screen readers");
+  });
+
+  it("answers a person's browser with a page, and an app with JSON", async () => {
+    const browser = { headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "nl" }, redirect: "manual" as const };
+
+    // Someone pasted the server URL into the address bar.
+    const pasted = await fetch(`${base}/mcp`, browser);
+    assert.equal(pasted.status, 302);
+    assert.equal(pasted.headers.get("location"), "/");
+
+    const missing = await fetch(`${base}/nope`, browser);
+    assert.equal(missing.status, 404);
+    const page = await missing.text();
+    assert.match(page, /Pagina niet gevonden/);
+    assert.match(page, /<a href="\/">Naar de startpagina<\/a>/);
+
+    const app = await fetch(`${base}/nope`);
+    assert.equal(app.status, 404);
+    assert.deepEqual(await app.json(), { error: "not_found" });
+  });
+
   it("answers the health check", async () => {
     assert.equal((await fetch(`${base}/health`)).status, 200);
   });
@@ -268,6 +296,14 @@ describe("client registration", () => {
     const res = await fetch(`${base}/authorize?${query}`, { redirect: "manual" });
     assert.equal(res.status, 400);
   });
+
+  it("tells a person what to do when their app's registration no longer counts", async () => {
+    const query = new URLSearchParams({ response_type: "code", client_id: "pmc_forged", redirect_uri: REDIRECT, code_challenge: "x", code_challenge_method: "S256" });
+    const res = await fetch(`${base}/authorize?${query}`, { headers: { Accept: "text/html", "Accept-Language": "en" }, redirect: "manual" });
+    assert.equal(res.status, 400);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(await res.text(), /Remove the Picnic connector in your AI app, add it again/);
+  });
 });
 
 describe("sign-in", () => {
@@ -297,6 +333,14 @@ describe("sign-in", () => {
     }
   });
 
+  it("ignores a second click on the sign-in and code forms", async () => {
+    const { client } = await register();
+    const page = await (await openSignIn(client.client_id, pkce().challenge)).text();
+    assert.match(page, /addEventListener\("submit"/);
+    const login = await fetch(`${base}/login`, form({ tx: hidden(page, "tx"), lang: "en", country: "NL", email: "kim@example.com", password: FakePicnic.PASSWORD }));
+    assert.match(await login.text(), /addEventListener\("submit"/);
+  });
+
   it("escapes a hostile client name", async () => {
     const { client } = await register({ client_name: `<script>alert(1)</script>` });
     const html = await (await openSignIn(client.client_id, pkce().challenge)).text();
@@ -311,6 +355,8 @@ describe("sign-in", () => {
     const html = await res.text();
     assert.equal(res.status, 401);
     assert.match(html, /don&#39;t match/);
+    assert.match(html, /Check the country too/, "a Picnic account only exists in its own country");
+    assert.match(html, /<input type="password"[^>]* aria-describedby="form-error"/);
     assert.match(html, /value="kim@example.com"/);
     assert.ok(!html.includes("wrong-password"));
   });
@@ -368,6 +414,8 @@ describe("sign-in", () => {
         statuses.push(res.status);
       }
       assert.deepEqual(statuses, [400, 400, 400, 429, 429]);
+      const page = await (await fetch(`${config.publicUrl.origin}/login`, form({ tx: "A".repeat(80), lang: "en", email: "a@b.nl", password: "x" }))).text();
+      assert.match(page, /<h1>Too many attempts<\/h1><p class="lead">Wait a few minutes, then go back to your AI app/);
     } finally {
       await new Promise((resolve) => limited.close(resolve));
     }
@@ -595,6 +643,43 @@ describe("mcp", () => {
 
     await kim.close();
     await sam.close();
+  });
+
+  it("lists delivery slots per day, a few days at a time, in local time", async () => {
+    const client = await mcp((await connect()).access_token);
+    const call = async (args: Record<string, unknown>) => JSON.parse(textOf(await client.callTool({ name: "get_delivery_slots", arguments: args })));
+
+    const first = await call({});
+    assert.deepEqual(first.selected_slot, { slot_id: "slot-20-1", window: "Friday 2026-11-20 18:15–19:15", chosen_by_user: false });
+    assert.equal(first.minimum_order_value, "€40.00", "said once, not on every slot");
+    assert.deepEqual(first.days.map((d: { date: string }) => d.date), ["2026-11-16", "2026-11-17", "2026-11-18"]);
+    assert.deepEqual(first.later_dates, ["2026-11-19", "2026-11-20"]);
+    assert.deepEqual(first.days[0], {
+      date: "2026-11-16",
+      weekday: "Monday",
+      slots: [
+        { slot_id: "slot-16-1", window: "18:15–19:15", order_before: "Sunday 2026-11-15 23:00" },
+        { slot_id: "slot-16-2", window: "18:15–20:15", order_before: "Sunday 2026-11-15 23:00", green_choice: true },
+      ],
+    });
+    assert.equal(first.days[1].slots.length, 1, "a full slot is left out");
+
+    const oneDay = await call({ date: "2026-11-17", include_unavailable: true });
+    assert.deepEqual(oneDay.days.map((d: { date: string }) => d.date), ["2026-11-17"]);
+    assert.equal(oneDay.days[0].slots[1].unavailable, true);
+    assert.equal(oneDay.other_dates.length, 4);
+
+    assert.equal((await call({ days: 14 })).days.length, 5);
+    assert.match((await call({ date: "2027-01-01" })).hint, /No slots on that day/);
+    assert.equal((await client.callTool({ name: "get_delivery_slots", arguments: { date: "tomorrow" } })).isError, true);
+    await client.close();
+  });
+
+  it("gives the arrival time of a delivery on the user's clock, not in UTC", async () => {
+    const client = await mcp((await connect()).access_token);
+    const out = JSON.parse(textOf(await client.callTool({ name: "track_delivery", arguments: { delivery_id: "d1" } })));
+    assert.deepEqual(out, { delivery_id: "d1", driver_on_the_way: true, expected_arrival: "Monday 2026-11-16 17:42" });
+    await client.close();
   });
 
   it("rejects invalid arguments", async () => {

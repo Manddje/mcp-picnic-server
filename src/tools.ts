@@ -279,16 +279,37 @@ export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
     "get_delivery_slots",
     {
       title: "Delivery slots",
-      description: "The delivery windows the user can choose from, with the selected one. Times are in the user's local time.",
-      input: { include_unavailable: z.boolean().default(false).describe("Also list slots that are full or closed. Default false.") },
+      description:
+        "The delivery windows the user can choose from, per day, with the selected one. Shows the first 3 days that have slots; pass date for one specific day, or days for more. later_dates lists the days left out. Times are in the user's local time.",
+      input: {
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional()
+          .describe('Only the slots of this day, as YYYY-MM-DD, e.g. "2026-03-14".'),
+        days: z.number().int().min(1).max(14).default(3).describe("How many days to show, counted from the first day with slots. Default 3. Ignored with date."),
+        include_unavailable: z.boolean().default(false).describe("Also list slots that are full or closed. Default false."),
+      },
       annotations: READ,
     },
-    async ({ include_unavailable }) => {
+    async ({ date, days, include_unavailable }) => {
       const { slots, selectedSlot } = await picnic.cart.getDeliverySlots();
+      const all = fmt.deliveryDays(slots.filter((s) => include_unavailable || s.isAvailable || s.isSelected));
+      const shown = date ? all.filter((d) => d.date === date) : all.slice(0, days);
+      // One minimum order value for every slot is the rule; say it once then.
+      const minimums = new Set(all.flatMap((d) => d.slots.map((s) => s.minimum_order_value)));
+      const shared = minimums.size === 1 ? [...minimums][0] : undefined;
       return {
-        selected_slot_id: selectedSlot?.slotId,
-        selected_by_user: selectedSlot?.isExplicitSelection,
-        slots: slots.filter((s) => include_unavailable || s.isAvailable || s.isSelected).map(fmt.deliverySlot),
+        selected_slot: selectedSlot && {
+          slot_id: selectedSlot.slotId,
+          window: fmt.window(selectedSlot.windowStart, selectedSlot.windowEnd),
+          chosen_by_user: selectedSlot.isExplicitSelection,
+        },
+        minimum_order_value: shared,
+        days: shown.map((d) => ({ ...d, slots: d.slots.map((s) => (shared ? { ...s, minimum_order_value: undefined } : s)) })),
+        later_dates: date ? undefined : all.slice(days).map((d) => d.date),
+        other_dates: date ? all.filter((d) => d.date !== date).map((d) => d.date) : undefined,
+        hint: shown.length === 0 ? (date ? "No slots on that day. Pick one of other_dates." : "No delivery slots available right now.") : undefined,
       };
     },
   );
@@ -336,7 +357,7 @@ export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
     "track_delivery",
     {
       title: "Track delivery",
-      description: "Where today's delivery is: whether the driver is on the way and the expected arrival time.",
+      description: "Where today's delivery is: whether the driver is on the way and the expected arrival time, in the user's local time.",
       input: { delivery_id: z.string().trim().min(1).max(80).describe("The delivery_id of a CURRENT delivery from list_deliveries.") },
       annotations: READ,
     },
@@ -345,8 +366,9 @@ export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
       return {
         delivery_id,
         driver_on_the_way: position.inProgress,
-        expected_arrival: position.eta ? new Date(position.eta).toISOString() : undefined,
-        arrival_window: position.etaWindowStart && position.etaWindowEnd ? `${position.etaWindowStart} – ${position.etaWindowEnd}` : undefined,
+        // In the user's local time, like every other time these tools give.
+        expected_arrival: fmt.moment(position.eta),
+        arrival_window: fmt.window(position.etaWindowStart, position.etaWindowEnd),
       };
     },
   );

@@ -141,6 +141,42 @@ export class FakePicnic {
           this.carts.delete(authed());
           return cartOf();
         },
+        getDeliverySlots: async () => {
+          authed();
+          // Five days in winter time, each with a one-hour and a two-hour slot; the last slot of day two is full.
+          const slots = [16, 17, 18, 19, 20].flatMap((day, d) =>
+            [
+              { hours: 1, green: false },
+              { hours: 2, green: true },
+            ].map(({ hours, green }, i) => ({
+              slotId: `slot-${day}-${hours}`,
+              windowStart: `2026-11-${day}T18:15:00.000+01:00`,
+              windowEnd: `2026-11-${day}T${18 + hours}:15:00.000+01:00`,
+              cutOffTime: `2026-11-${day - 1}T23:00:00.000+01:00`,
+              isAvailable: !(d === 1 && i === 1),
+              isSelected: d === 4 && i === 0,
+              isGreenChoice: green,
+              minimumOrderValue: 4000,
+            })),
+          );
+          return {
+            slots,
+            selectedSlot: {
+              slotId: "slot-20-1",
+              state: "IMPLICIT",
+              windowStart: "2026-11-20T18:15:00.000+01:00",
+              windowEnd: "2026-11-20T19:15:00.000+01:00",
+              isExplicitSelection: false,
+            },
+          };
+        },
+      },
+      delivery: {
+        // 16:42 in UTC, which is 17:42 on the user's clock in winter.
+        getDeliveryPosition: async () => {
+          authed();
+          return { routeVersion: 1, inProgress: true, queryInterval: 15000, eta: Date.UTC(2026, 10, 16, 16, 42), etaWindowStart: null, etaWindowEnd: null, routeTime: 0 };
+        },
       },
       catalog: {
         getSearchResults: async (query: string) => {

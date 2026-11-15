@@ -7,11 +7,11 @@ import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelconte
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
 import { Sealer } from "./crypto.js";
-import { isLang, pickLang } from "./i18n.js";
+import { isLang, pickLang, STRINGS } from "./i18n.js";
 import { ICON_PATHS, mcpIcons, sendIcon } from "./icons.js";
 import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
-import { sendLanding } from "./pages.js";
+import { sendLanding, sendMessagePage } from "./pages.js";
 import { createPicnicClient, type PicnicFactory } from "./picnic.js";
 import { buildMcpServer, type ServerInfo } from "./tools.js";
 
@@ -27,6 +27,11 @@ export type AppOptions = {
   accountAttemptLimit?: number;
   log?: (message: string) => void;
 };
+
+/** Whether a person's browser is asking, rather than an app: only a browser prefers HTML over JSON. */
+function wantsHtml(req: Request): boolean {
+  return req.accepts(["json", "text/event-stream", "html"]) === "html";
+}
 
 function rpcError(res: Response, status: number, code: number, message: string): void {
   res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
@@ -92,6 +97,15 @@ export function createApp({
   // them out; these only stop floods. Registering stores nothing, and a token request without a
   // valid code or refresh token costs a failed decryption.
   const serverToServer = { windowMs: 60 * 1000, limit: 1200 };
+
+  // /authorize is opened in a person's browser. When the app's registration no longer counts (the
+  // secret key changed, or the app is blocked), tell them what to do instead of answering in JSON.
+  app.get("/authorize", (req, res, next) => {
+    const clientId = req.query.client_id;
+    if ((typeof clientId === "string" && provider.clientsStore.getClient(clientId)) || !wantsHtml(req)) return next();
+    const lang = pickLang(req);
+    sendMessagePage(res, 400, lang, config.serviceName, STRINGS[lang].unknownClientTitle, STRINGS[lang].unknownClientText);
+  });
 
   app.use(
     mcpAuthRouter({
@@ -178,12 +192,19 @@ export function createApp({
     }
   });
   // The server never pushes messages on its own, so there is no stream to open and no session to end.
-  app.all("/mcp", mcpCors, (_req, res) => {
+  app.all("/mcp", mcpCors, (req, res) => {
+    // Someone pasted the server URL into their browser: the home page says what to do with it.
+    if (req.method === "GET" && wantsHtml(req)) return res.redirect(302, "/");
     res.setHeader("Allow", "POST, OPTIONS");
     rpcError(res, 405, -32000, "Method not allowed. Send MCP requests with POST.");
   });
 
-  app.use((_req, res) => {
+  app.use((req, res) => {
+    if (wantsHtml(req)) {
+      const lang = pickLang(req);
+      const t = STRINGS[lang];
+      return sendMessagePage(res, 404, lang, config.serviceName, t.notFoundTitle, t.notFoundText, { href: "/", label: t.backHome });
+    }
     res.status(404).json({ error: "not_found" });
   });
 

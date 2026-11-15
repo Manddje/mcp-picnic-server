@@ -87,7 +87,7 @@ export function createLoginRouter({
     legacyHeaders: false,
     handler: (req, res) => {
       const lang = pickLang(req);
-      sendMessagePage(res, 429, lang, serviceName, STRINGS[lang].errTooMany, "");
+      sendMessagePage(res, 429, lang, serviceName, STRINGS[lang].tooManyTitle, STRINGS[lang].tooManyText);
     },
   });
 
