@@ -13,6 +13,7 @@ const app = createApp({ config });
 const server = app.listen(config.port, config.host, () => {
   console.log(`${config.serviceName} v${VERSION} listening on ${config.host}:${config.port}`);
   console.log(`Public URL: ${config.publicUrl.origin}  ·  MCP endpoint: ${new URL("/mcp", config.publicUrl).href}`);
+  if (config.ahEnabled) console.log(`Albert Heijn MCP endpoint: ${new URL("/ah/mcp", config.publicUrl).href}`);
 });
 
 function shutdown(signal: string): void {

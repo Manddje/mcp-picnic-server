@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Implementation, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import PicnicClient from "picnic-api";
 import { z } from "zod";
 import * as fmt from "./format.js";
+import { DESTRUCTIVE, READ, toolRegistrar, WRITE, type ServerInfo } from "./mcp-tool.js";
 import { classifyPicnicError, type Country } from "./picnic.js";
 
 export type ToolContext = {
@@ -51,36 +51,11 @@ const cartItems = z
   .min(1)
   .max(60);
 
-const READ: ToolAnnotations = { readOnlyHint: true, openWorldHint: true };
-const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
-const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
-
-/** What the server tells a client about itself, besides its name. */
-export type ServerInfo = Pick<Implementation, "version" | "websiteUrl" | "icons">;
-
 export function buildMcpServer(ctx: ToolContext, info: ServerInfo): McpServer {
   const server = new McpServer({ name: "picnic", title: "Picnic", ...info }, { instructions: SERVER_INSTRUCTIONS });
   const { picnic } = ctx;
 
-  /** Registers a tool whose result is returned as compact JSON and whose errors become readable text. */
-  function tool<Shape extends z.ZodRawShape>(
-    name: string,
-    config: { title: string; description: string; input?: Shape; annotations: ToolAnnotations },
-    run: (args: z.infer<z.ZodObject<Shape>>) => Promise<unknown>,
-  ): void {
-    server.registerTool(
-      name,
-      { title: config.title, description: config.description, inputSchema: (config.input ?? {}) as Shape, annotations: config.annotations },
-      (async (args: z.infer<z.ZodObject<Shape>>) => {
-        try {
-          const result = await run(args);
-          return { content: [{ type: "text" as const, text: JSON.stringify(fmt.clean(result)) }] };
-        } catch (error) {
-          return { content: [{ type: "text" as const, text: explain(error) }], isError: true };
-        }
-      }) as never,
-    );
-  }
+  const tool = toolRegistrar(server, explain);
 
   /* ---------- Products ---------- */
 

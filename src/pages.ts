@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Response } from "express";
+import { AH_STRINGS } from "./ah/i18n.js";
 import { LANG_NAMES, LANGS, STRINGS, type Lang, type Strings } from "./i18n.js";
 import { ICON_LINKS, ICON_SVG } from "./icons.js";
 import { COUNTRIES, type Country } from "./picnic.js";
@@ -56,6 +57,9 @@ footer p{margin:4px 0}
 .login h1{font-size:26px;letter-spacing:-.02em;margin-top:6px}
 .login .lead{margin:10px 0 0}
 .login .sub{margin:4px 0 0;color:var(--muted);font-size:15px}
+label .sub{font-weight:400}
+form p{margin:8px 0 0}
+form details{margin-top:0}
 form{margin-top:22px;display:grid;gap:14px}
 label{display:grid;gap:6px;font-size:14px;font-weight:600}
 input,select{font:inherit;font-size:16px;font-weight:400;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:9px;padding:11px 12px;width:100%}
@@ -77,7 +81,7 @@ type HtmlOptions = {
   indexable?: boolean;
 };
 
-function sendHtml(res: Response, status: number, lang: Lang, title: string, body: string, { script = "", head = "", indexable = false }: HtmlOptions = {}): void {
+export function sendHtml(res: Response, status: number, lang: Lang, title: string, body: string, { script = "", head = "", indexable = false }: HtmlOptions = {}): void {
   const nonce = randomBytes(16).toString("base64");
   res.status(status);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -105,11 +109,11 @@ ${script ? `<script nonce="${nonce}">${script}</script>` : ""}
 </html>`);
 }
 
-function brand(serviceName: string): string {
+export function brand(serviceName: string): string {
   return `<div class="brand"><img src="${ICON_URI}" alt="" width="32" height="32"><span>${esc(serviceName)}</span></div>`;
 }
 
-function langLinks(current: Lang, hrefFor: (lang: Lang) => string): string {
+export function langLinks(current: Lang, hrefFor: (lang: Lang) => string): string {
   return `<nav class="langs" aria-label="Language">${LANGS.map(
     (l) => `<a href="${esc(hrefFor(l))}" lang="${l}" hreflang="${l}" title="${LANG_NAMES[l]}"${l === current ? ' aria-current="true"' : ""}>${l.toUpperCase()}</a>`,
   ).join("")}</nav>`;
@@ -124,6 +128,8 @@ export type LandingOptions = {
   /** Whether the address names the language (`/?lang=nl`), rather than leaving it to the browser (`/`). */
   pinned: boolean;
   mcpUrl: string;
+  /** The address of the Albert Heijn connector, when this server has one. */
+  ahMcpUrl: string | null;
   contact: string | null;
   sourceUrl: string | null;
 };
@@ -168,6 +174,7 @@ function landingHead(lang: Lang, title: string, o: LandingOptions): string {
 
 export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void {
   const t = STRINGS[lang];
+  const ah = AH_STRINGS[lang];
   const url = o.mcpUrl;
   const cursorConfig = Buffer.from(JSON.stringify({ url })).toString("base64");
   const cursorLink = `cursor://anysphere.cursor-deeplink/mcp/install?name=picnic&config=${encodeURIComponent(cursorConfig)}`;
@@ -201,6 +208,21 @@ export function sendLanding(res: Response, lang: Lang, o: LandingOptions): void 
 <details><summary>${esc(t.vscodeTitle)}</summary><div><p><a class="btn" href="${esc(vscodeLink)}">${esc(t.vscodeButton)}</a></p><p>${esc(t.vscodeManual)}</p><pre>code --add-mcp '${esc(vscodeConfig)}'</pre></div></details>
 <details><summary>${esc(t.otherTitle)}</summary><div><p>${esc(t.otherText)}</p><pre>${esc(remoteJson)}</pre></div></details>
 </section>
+
+${
+    o.ahMcpUrl
+      ? `<section>
+<h2>${esc(ah.landingTitle)}</h2>
+<p class="note">${esc(ah.landingText)}</p>
+<div class="card">
+<div class="label">${esc(ah.landingUrlLabel)}</div>
+<div class="copyrow"><code id="ah-mcp-url">${esc(o.ahMcpUrl)}</code><button type="button" data-copy="ah-mcp-url" data-done="${esc(t.copied)}">${esc(t.copy)}</button></div>
+</div>
+<p class="note">${esc(ah.landingSignin)}</p>
+<p class="fine">${esc(ah.disclaimer)}</p>
+</section>`
+      : ""
+  }
 
 <section>
 <h2>${esc(t.askTitle)}</h2>
@@ -245,7 +267,7 @@ export function describeRedirect(redirectUri: string, t: Strings): string {
   }
 }
 
-function fill(template: string, key: string, html: string): string {
+export function fill(template: string, key: string, html: string): string {
   const [before = "", after = ""] = template.split(`{${key}}`);
   return `${esc(before)}${html}${esc(after)}`;
 }

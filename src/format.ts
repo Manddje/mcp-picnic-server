@@ -15,25 +15,6 @@ export function eur(cents: number | null | undefined): string | undefined {
   return typeof cents === "number" ? `€${(cents / 100).toFixed(2)}` : undefined;
 }
 
-/** Drops empty values (null, undefined, "", [], {}) so results stay short for the model. */
-export function clean(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(clean).filter((v) => v !== undefined);
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, raw] of Object.entries(value)) {
-      const v = clean(raw);
-      if (v === undefined || v === null || v === "") continue;
-      if (Array.isArray(v) && v.length === 0) continue;
-      if (typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0) continue;
-      out[key] = v;
-    }
-    return out;
-  }
-  return value === null ? undefined : value;
-}
-
 function bulkPrices(ranges: { price: number; from_quantity: number }[] | null | undefined): string[] | undefined {
   const tiers = ranges?.filter((r) => r.from_quantity > 1);
   return tiers?.length ? tiers.map((r) => `${eur(r.price)} each from ${r.from_quantity}`) : undefined;
