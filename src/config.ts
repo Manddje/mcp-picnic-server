@@ -19,16 +19,12 @@ export type Config = {
   extraKnownApps: string[];
   /** What to do with an app whose redirect URI is not a known one: warn on the sign-in page, or refuse it. */
   unknownApps: "warn" | "block";
-  /** Sign-ins that reach Picnic (or Albert Heijn) per minute, for the whole server, so it doesn't throttle this IP address. */
+  /** Sign-ins that reach Picnic per minute, for the whole server, so Picnic doesn't throttle its IP address. */
   signInLimitPerMinute: number;
   /** Optional contact shown on the landing page (email address or URL). */
   contact: string | null;
   /** Optional link to the source code shown on the landing page. */
   sourceUrl: string | null;
-  /** Whether the Albert Heijn connector is served too, at /ah/mcp. Off unless asked for. */
-  ahEnabled: boolean;
-  /** Name shown on the Albert Heijn sign-in page. */
-  ahServiceName: string;
 };
 
 function firstUrl(value: string | undefined): string | undefined {
@@ -102,11 +98,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("SIGN_IN_LIMIT_PER_MINUTE must be a whole number of at least 1");
   }
 
-  const ahEnabled = env.AH_ENABLED?.trim() || "false";
-  if (ahEnabled !== "true" && ahEnabled !== "false") {
-    throw new Error(`AH_ENABLED must be "true" or "false" (got "${ahEnabled}")`);
-  }
-
   return {
     publicUrl,
     port,
@@ -119,7 +110,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     signInLimitPerMinute,
     contact: env.CONTACT?.trim() || null,
     sourceUrl: env.SOURCE_URL?.trim() || null,
-    ahEnabled: ahEnabled === "true",
-    ahServiceName: env.AH_SERVICE_NAME?.trim() || "Albert Heijn MCP",
   };
 }

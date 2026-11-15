@@ -1,6 +1,6 @@
 {
   "name": "mop-picnic-server",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Hosted, multi-user MCP server for the Picnic online supermarket. Add one URL to Claude or any other MCP client and sign in with your Picnic account.",
   "main": "dist/index.js",
   "scripts": {
@@ -8,8 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
-    "probe:ah": "tsx scripts/probe-ah.ts"
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "repository": {
     "type": "git",
@@ -18,7 +17,6 @@
   "keywords": [
     "mcp",
     "picnic",
-    "albert-heijn",
     "model-context-protocol",
     "claude",
     "supermarket"

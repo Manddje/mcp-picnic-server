@@ -5,13 +5,6 @@ import { rateLimit } from "express-rate-limit";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { AhAuth, AhClient, type AhFetch } from "./ah/client.js";
-import { createAhLoginRouter } from "./ah/login.js";
-import { AH_SCOPE, AhOAuthProvider, ahSessionOf } from "./ah/oauth.js";
-import { AhPublic } from "./ah/public.js";
-import { buildAhMcpServer } from "./ah/tools.js";
 import type { Config } from "./config.js";
 import { Sealer } from "./crypto.js";
 import { isLang, pickLang } from "./i18n.js";
@@ -20,18 +13,14 @@ import { createLoginRouter } from "./login.js";
 import { PicnicOAuthProvider, RedirectPolicy, SCOPE, sessionOf } from "./oauth.js";
 import { sendLanding } from "./pages.js";
 import { createPicnicClient, type PicnicFactory } from "./picnic.js";
-import { StoreOAuthProvider } from "./stores.js";
-import type { ServerInfo } from "./mcp-tool.js";
-import { buildMcpServer } from "./tools.js";
+import { buildMcpServer, type ServerInfo } from "./tools.js";
 
-export const VERSION = "1.1.0";
+export const VERSION = "1.0.0";
 
 export type AppOptions = {
   config: Config;
   /** Creates the Picnic client for a request; replaced by a fake in tests. */
   picnic?: PicnicFactory;
-  /** Makes the requests to Albert Heijn; replaced by a fake in tests. */
-  ahFetch?: AhFetch;
   /** Sign-in attempts allowed per IP address per 15 minutes. */
   signInAttemptLimit?: number;
   /** Sign-in attempts allowed per Picnic account per 15 minutes. */
@@ -46,7 +35,6 @@ function rpcError(res: Response, status: number, code: number, message: string):
 export function createApp({
   config,
   picnic = createPicnicClient,
-  ahFetch = fetch,
   signInAttemptLimit = 15,
   accountAttemptLimit = 10,
   log = console.log,
@@ -56,12 +44,8 @@ export function createApp({
   app.set("trust proxy", config.trustProxy);
 
   const sealer = new Sealer(config.secretKey);
-  const redirectPolicy = new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block");
-  const provider = new PicnicOAuthProvider(sealer, picnic, redirectPolicy);
+  const provider = new PicnicOAuthProvider(sealer, picnic, new RedirectPolicy(config.extraKnownApps, config.unknownApps === "block"));
   const mcpUrl = new URL("/mcp", config.publicUrl);
-  // The second connector. Without it the server is the Picnic server it always was.
-  const ahAuth = new AhAuth(ahFetch);
-  const ah = config.ahEnabled ? { url: new URL("/ah/mcp", config.publicUrl), provider: new AhOAuthProvider(sealer, ahAuth) } : null;
   const secure = config.publicUrl.protocol === "https:";
   const serverInfo: ServerInfo = { version: VERSION, websiteUrl: config.publicUrl.href, icons: mcpIcons(config.publicUrl) };
 
@@ -90,7 +74,6 @@ export function createApp({
       // `/` follows the browser's language; `/?lang=xx` is that language's own address.
       pinned: isLang(req.query.lang),
       mcpUrl: mcpUrl.href,
-      ahMcpUrl: ah?.url.href ?? null,
       contact: config.contact,
       sourceUrl: config.sourceUrl,
     });
@@ -104,26 +87,6 @@ export function createApp({
 
   app.get(ICON_PATHS, sendIcon);
 
-  const resourceMetadata = (resource: URL, scope: string, name: string) => (_req: Request, res: Response) => {
-    res.json({
-      resource: resource.href,
-      authorization_servers: [config.publicUrl.href],
-      scopes_supported: [scope],
-      resource_name: name,
-      bearer_methods_supported: ["header"],
-    });
-  };
-  // Some clients look for the resource metadata at the root instead of under the /mcp path.
-  app.get("/.well-known/oauth-protected-resource", cors(), resourceMetadata(mcpUrl, SCOPE, config.serviceName));
-  if (ah) {
-    // Each MCP address names its own scope; the router below would give both addresses both scopes.
-    const pathOf = (resource: URL) => new URL(getOAuthProtectedResourceMetadataUrl(resource)).pathname;
-    app.get(pathOf(mcpUrl), cors(), resourceMetadata(mcpUrl, SCOPE, config.serviceName));
-    // An app that doesn't find this one falls back to the one at the root, which describes the
-    // Picnic address, and then signs in for the wrong connector.
-    app.get(pathOf(ah.url), cors(), resourceMetadata(ah.url, AH_SCOPE, config.ahServiceName));
-  }
-
   // Registration and token requests are made by the AI app's servers, so thousands of users can share
   // a handful of IP addresses there. A limit per IP address that suits one user would lock all of
   // them out; these only stop floods. Registering stores nothing, and a token request without a
@@ -132,11 +95,11 @@ export function createApp({
 
   app.use(
     mcpAuthRouter({
-      provider: ah ? new StoreOAuthProvider(provider, ah.provider, ah.url) : provider,
+      provider,
       issuerUrl: config.publicUrl,
       resourceServerUrl: mcpUrl,
       resourceName: config.serviceName,
-      scopesSupported: ah ? [SCOPE, AH_SCOPE] : [SCOPE],
+      scopesSupported: [SCOPE],
       serviceDocumentationUrl: config.publicUrl,
       // The sign-in page is opened in the user's own browser.
       authorizationOptions: { rateLimit: { windowMs: 15 * 60 * 1000, limit: 60 } },
@@ -145,6 +108,17 @@ export function createApp({
       revocationOptions: { rateLimit: serverToServer },
     }),
   );
+
+  // Some clients look for the resource metadata at the root instead of under the /mcp path.
+  app.get("/.well-known/oauth-protected-resource", cors(), (_req, res) => {
+    res.json({
+      resource: mcpUrl.href,
+      authorization_servers: [config.publicUrl.href],
+      scopes_supported: [SCOPE],
+      resource_name: config.serviceName,
+      bearer_methods_supported: ["header"],
+    });
+  });
 
   app.use(
     createLoginRouter({
@@ -159,23 +133,7 @@ export function createApp({
     }),
   );
 
-  if (ah) {
-    app.use(
-      createAhLoginRouter({
-        sealer,
-        provider: ah.provider,
-        auth: ahAuth,
-        clients: provider.clientsStore,
-        redirectPolicy,
-        serviceName: config.ahServiceName,
-        attemptLimit: signInAttemptLimit,
-        globalLimitPerMinute: config.signInLimitPerMinute,
-        log,
-      }),
-    );
-  }
-
-  /* ---------- MCP endpoints ---------- */
+  /* ---------- MCP endpoint ---------- */
 
   const mcpCors = cors({
     origin: true,
@@ -184,91 +142,46 @@ export function createApp({
     exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"],
     maxAge: 86400,
   });
-
-  type McpEndpoint = {
-    url: URL;
-    verifier: OAuthTokenVerifier;
-    /** The scope an app is told to ask for when it comes without a token for this endpoint. */
-    scope?: string;
-    /** What tells one signed-in user from another, for the limit per user. */
-    userOf: (req: Request) => string;
-    /** The server with this request's user's tools. */
-    build: (req: Request) => McpServer;
-  };
-
-  function mountMcp({ url, verifier, scope, userOf, build }: McpEndpoint): void {
-    const path = url.pathname;
-    const bearer = requireBearerAuth({
-      verifier,
-      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(url),
-      ...(scope ? { requiredScopes: [scope] } : {}),
-    });
-    // Per signed-in user, not per IP address (see above). Runs after authentication.
-    const perUser = rateLimit({
-      windowMs: 60 * 1000,
-      limit: 120,
-      standardHeaders: true,
-      legacyHeaders: false,
-      keyGenerator: (req) => createHash("sha256").update(userOf(req)).digest("base64url"),
-      handler: (_req, res) => rpcError(res, 429, -32000, "Too many requests. Wait a minute before trying again."),
-    });
-
-    app.options(path, mcpCors);
-    app.post(path, mcpCors, bearer, perUser, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
-      // No sessions: every request carries its token, so any request can be served on its own.
-      const server = build(req);
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      res.on("close", () => {
-        void transport.close();
-        void server.close();
-      });
-      try {
-        await server.connect(transport);
-        await transport.handleRequest(req, res, req.body);
-      } catch (error) {
-        log(`mcp request failed: ${error instanceof Error ? error.message : "unknown error"}`);
-        if (!res.headersSent) rpcError(res, 500, -32603, "Internal server error");
-      }
-    });
-    // The server never pushes messages on its own, so there is no stream to open and no session to end.
-    app.all(path, mcpCors, (_req, res) => {
-      res.setHeader("Allow", "POST, OPTIONS");
-      rpcError(res, 405, -32000, "Method not allowed. Send MCP requests with POST.");
-    });
-  }
-
-  mountMcp({
-    url: mcpUrl,
+  const bearer = requireBearerAuth({
     verifier: provider,
-    userOf: (req) => sessionOf(req.auth).authKey,
-    build: (req) => {
-      const session = sessionOf(req.auth);
-      return buildMcpServer({ picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) }, serverInfo);
-    },
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl),
+  });
+  // Per signed-in user, not per IP address (see above). Runs after authentication.
+  const perUser = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => createHash("sha256").update(sessionOf(req.auth).authKey).digest("base64url"),
+    handler: (_req, res) => rpcError(res, 429, -32000, "Too many requests. Wait a minute before trying again."),
   });
 
-  if (ah) {
-    const shared = new AhPublic(ahAuth, ahFetch);
-    mountMcp({
-      url: ah.url,
-      verifier: { verifyAccessToken: (token) => ah.provider.verifyAccessToken(token) },
-      scope: AH_SCOPE,
-      userOf: (req) => ahSessionOf(req.auth).id,
-      build: (req) => {
-        const session = ahSessionOf(req.auth);
-        return buildAhMcpServer(
-          {
-            ah: new AhClient(session.accessToken, ahFetch),
-            member: session.member,
-            shared,
-            signOut: () => ah.provider.signOut(session),
-            tokenRefused: () => ah.provider.markRefused(session),
-          },
-          serverInfo,
-        );
-      },
+  app.options("/mcp", mcpCors);
+  app.post("/mcp", mcpCors, bearer, perUser, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
+    // No sessions: every request carries its token, so any request can be served on its own.
+    const session = sessionOf(req.auth);
+    const server = buildMcpServer(
+      { picnic: picnic(session), country: session.country, signOut: () => provider.signOut(session) },
+      serverInfo,
+    );
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
     });
-  }
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      log(`mcp request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      if (!res.headersSent) rpcError(res, 500, -32603, "Internal server error");
+    }
+  });
+  // The server never pushes messages on its own, so there is no stream to open and no session to end.
+  app.all("/mcp", mcpCors, (_req, res) => {
+    res.setHeader("Allow", "POST, OPTIONS");
+    rpcError(res, 405, -32000, "Method not allowed. Send MCP requests with POST.");
+  });
 
   app.use((_req, res) => {
     res.status(404).json({ error: "not_found" });
