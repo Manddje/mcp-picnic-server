@@ -13,6 +13,7 @@ RUN npm test
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
+RUN apk upgrade --no-cache
 ENV NODE_ENV=production PORT=3000
 WORKDIR /app
 COPY --from=build /app/package.json ./
