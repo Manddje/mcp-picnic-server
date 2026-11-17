@@ -32,26 +32,40 @@ The first time, a sign-in page opens: Picnic email address, password, and the co
 
 There is deliberately no tool to check out, pay or cancel an order. The assistant prepares the cart; the user orders in the Picnic app.
 
-## Deploy on Coolify
+## Deploy
 
-1. Create a new resource from this Git repository and choose the **Dockerfile** build pack.
-2. Set the domain (for example `https://picnic.example.com`) and the exposed port to `3000`. Leave **Ports Mappings** empty, so the app is only reachable through Coolify's proxy.
-3. Add one environment variable: `SECRET_KEY`, the output of `openssl rand -hex 32`.
-4. Deploy. The health check is built into the image (`/health`).
+The server is one Docker container without a database or a volume. It needs a public `https://` address, so run it behind a reverse proxy that handles TLS (Caddy, Traefik, nginx, or the one your hosting platform provides).
 
-The image build runs the tests. When one fails the build fails, so Coolify keeps the version that is running.
+1. Copy `.env.example` to `.env`. Set `SECRET_KEY` to the output of `openssl rand -hex 32`, `PUBLIC_URL` to the address people will use (for example `https://picnic.example.com`) and `TRUST_PROXY` to the number of reverse proxies in front, usually `1`.
+2. Build the image:
 
-The public address is taken from the domain Coolify assigns (`COOLIFY_URL`). Set `PUBLIC_URL` yourself when you run it elsewhere.
+   ```bash
+   docker build -t picnic-mcp .
+   ```
+
+3. Start it, reachable only by the reverse proxy on the same machine:
+
+   ```bash
+   docker run -d --name picnic-mcp --restart unless-stopped --env-file .env -p 127.0.0.1:3000:3000 picnic-mcp
+   ```
+
+4. Point the reverse proxy at port `3000`. The health check is built into the image (`/health`).
+
+The image build runs the tests. When one fails the build fails, so a platform that deploys from the build keeps the version that is running.
+
+On a platform that builds from a Git repository (Coolify, Render, Railway, Fly.io and the like), choose the Dockerfile build, set the port to `3000` and add the same variables there. On Coolify only `SECRET_KEY` is needed: the address comes from the domain you set for the app (`COOLIFY_URL`) and `TRUST_PROXY` defaults to `1`. Leave **Ports Mappings** empty there, so the app is only reachable through Coolify's proxy.
+
+Without Docker, on Node.js 20.6 or later: `npm ci`, `npm run build`, then `NODE_ENV=production node --env-file=.env dist/index.js`.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `SECRET_KEY` | yes | Encrypts every token; at least 32 characters. Changing it signs all users out. |
-| `PUBLIC_URL` | outside Coolify | The public `https://` origin, without a path. |
+| `PUBLIC_URL` | yes | The public `https://` origin, without a path. |
 | `PORT` | no | Default `3000`. |
 | `SERVICE_NAME` | no | Name on the pages. Default `Picnic MCP`. |
 | `CONTACT` | no | Email address or URL shown in the footer. |
 | `SOURCE_URL` | no | Link to the source code shown in the footer. |
-| `TRUST_PROXY` | no | Number of reverse proxies in front. Default `1` on Coolify, otherwise off. Set it to exactly the number of proxies: one too many lets visitors fake their IP address and walk past the sign-in limits. |
+| `TRUST_PROXY` | behind a proxy | Number of reverse proxies in front. Off by default. Set it to exactly the number of proxies: one too many lets visitors fake their IP address and walk past the sign-in limits, and without it every visitor shares the proxy's address and its limit. |
 | `UNKNOWN_APPS` | no | `block` (default) or `warn`. What to do with an app that isn't a known one; see below. |
 | `EXTRA_KNOWN_APPS` | no | Comma separated apps to treat as known ones: callback addresses (`https://app.example.com/oauth/callback`, a `*` stands for one last path segment), app schemes (`myapp://`) and host names (`app.example.com`). Prefer the callback address: a host name vouches for every page on that host. |
 | `SIGN_IN_LIMIT_PER_MINUTE` | no | Sign-ins that reach Picnic per minute, for the whole server. Default `60`. |
@@ -105,3 +119,7 @@ npm test
 ```bash
 npx @modelcontextprotocol/inspector
 ```
+
+## License
+
+[MIT](LICENSE). Picnic is a trademark of its owner; this project is independent and only talks to the API that the Picnic app itself uses.

@@ -11,9 +11,9 @@ export type Config = {
   /** Name shown on the landing and sign-in pages. */
   serviceName: string;
   /**
-   * Express "trust proxy" setting; 1 = one reverse proxy (Coolify/Traefik) in front. Off unless set
-   * or running on Coolify: trusting X-Forwarded-For without a proxy lets anyone pick their own IP
-   * address and so walk past the sign-in limits.
+   * Express "trust proxy" setting; 1 = one reverse proxy (Caddy, Traefik, nginx) in front. Off unless
+   * set, or the hosting platform is known to add one: trusting X-Forwarded-For without a proxy lets
+   * anyone pick their own IP address and so walk past the sign-in limits.
    */
   trustProxy: number | boolean | string;
   /** Extra known apps: callback addresses (https://example.com/oauth/callback), app schemes (myapp://) and whole host names (example.com). */
