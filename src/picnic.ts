@@ -70,7 +70,7 @@ export class PicnicGuard {
       userLimitPerMinute: number;
       /** How long no request goes to Picnic after it throttled one; 0 for no pause. */
       pauseMs: number;
-      /** How long a request may take. The library sets no limit itself, so a silent Picnic would hold a request for minutes. */
+      /** How long a request may take. The library gives up after 30 seconds itself; this limit is the shorter one, and the one users see. */
       timeoutMs?: number;
       log?: (message: string) => void;
       now?: () => number;
@@ -124,7 +124,7 @@ export class PicnicGuard {
       return await Promise.race([answer, givenUp]);
     } finally {
       clearTimeout(timer);
-      // The request itself can't be called back; whatever it still ends with is nobody's to handle.
+      // The request itself can't be called back (the library ends it at its own limit); whatever it still ends with is nobody's to handle.
       answer.catch(() => {});
     }
   }

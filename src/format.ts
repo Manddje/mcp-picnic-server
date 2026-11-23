@@ -64,7 +64,8 @@ export function productDetails(p: Product, imageUrl: string | undefined) {
     was: eur(p.originalPrice),
     unit_price: p.unitPrice,
     bulk_prices: bulkPrices(p.priceRanges),
-    max_quantity: p.maxCount,
+    // 99 is what the library fills in when Picnic's product page sends no limit, so it says nothing.
+    max_quantity: p.maxCount === 99 ? undefined : p.maxCount,
     promotion: p.promotion?.label,
     labels: p.labels.map((l) => l.text),
     tags: p.tags.map((t) => t.text),
