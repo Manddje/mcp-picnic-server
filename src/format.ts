@@ -50,6 +50,7 @@ export function productTile(p: ProductTile) {
     unit_price: p.unitPrice,
     deals: p.labels.map((l) => l.text).filter(Boolean),
     bulk_prices: bulkPrices(p.priceRanges),
+    deposit: eur(p.deposit),
     unavailable: p.isUnavailable || undefined,
   };
 }
