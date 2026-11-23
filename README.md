@@ -51,6 +51,8 @@ The server is one Docker container without a database or a volume. It needs a pu
 
 4. Point the reverse proxy at port `3000`. The health check is built into the image (`/health`).
 
+Each release is also published as a ready-made image for `amd64` and `arm64`. To use it, skip step 2 and replace the image name at the end of step 3 with `ghcr.io/manddje/mcp-picnic-server`, or with a fixed version such as `ghcr.io/manddje/mcp-picnic-server:1.1.0`.
+
 The image build runs the tests. When one fails the build fails, so a platform that deploys from the build keeps the version that is running.
 
 On a platform that builds from a Git repository (Coolify, Render, Railway, Fly.io and the like), choose the Dockerfile build, set the port to `3000` and add the same variables there. On Coolify only `SECRET_KEY` is needed: the address comes from the domain you set for the app (`COOLIFY_URL`) and `TRUST_PROXY` defaults to `1`. Leave **Ports Mappings** empty there, so the app is only reachable through Coolify's proxy.

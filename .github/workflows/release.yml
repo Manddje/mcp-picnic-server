@@ -1,0 +1,42 @@
+name: Release
+
+# Publishes the Docker image to GitHub Packages when a release is published.
+# The release tag has to be a version such as v1.2.0; the image then gets the
+# tags 1.2.0, 1.2 and latest. A pre-release (v1.2.0-rc.1) only gets its own tag.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # arm64 is built under emulation, so that half of the build is the slow one.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # The action lowercases the name, which the registry requires.
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      # The Dockerfile runs the tests, so a failing test stops the publish.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
