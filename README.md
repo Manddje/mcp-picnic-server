@@ -51,7 +51,7 @@ The server is one Docker container without a database or a volume. It needs a pu
 
 4. Point the reverse proxy at port `3000`. The health check is built into the image (`/health`).
 
-Each release is also published as a ready-made image for `amd64` and `arm64`. To use it, skip step 2 and replace the image name at the end of step 3 with `ghcr.io/manddje/mcp-picnic-server`, or with a fixed version such as `ghcr.io/manddje/mcp-picnic-server:1.1.0`.
+Each release is also published as a ready-made image for `amd64` and `arm64`. To use it, skip step 2 and replace the image name at the end of step 3 with `ghcr.io/manddje/mcp-picnic-server`, or with a fixed version such as `ghcr.io/manddje/mcp-picnic-server:1.1.1`.
 
 The image build runs the tests. When one fails the build fails, so a platform that deploys from the build keeps the version that is running.
 
