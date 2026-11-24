@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS build
+# This stage runs on the builder's own architecture, also for an image meant for another one:
+# what it produces is plain JavaScript, and Node crashes when it is emulated.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

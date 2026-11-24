@@ -14,9 +14,12 @@ permissions:
 jobs:
   image:
     runs-on: ubuntu-latest
+    # A build that hangs would otherwise run for six hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      # arm64 is built under emulation, so that half of the build is the slow one.
+      # Emulation is only for the last stage of the arm64 image; the Dockerfile
+      # builds and tests on the runner's own architecture.
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
